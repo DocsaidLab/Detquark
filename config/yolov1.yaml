@@ -1,0 +1,111 @@
+common:
+  batch_size: 128
+  is_restore: False
+  restore_ind: ""
+  restore_ckpt: ""
+  preview_batch: 10000
+  restore_all_states: False
+
+global_settings:
+  image_size: [640, 640]
+
+trainer:
+  max_epochs: 50
+  precision: bf16-mixed
+  val_check_interval: 1.0
+  gradient_clip_val: 5
+  accumulate_grad_batches: 1
+  accelerator: gpu
+  devices: [0]
+
+model:
+  name: ObjectDetectionModel
+  backbone:
+    name: Backbone
+    options:
+      name: timm_darknet17
+      pretrained: False
+      features_only: True
+  head:
+    name: YOLOv1Head
+    options:
+      in_channels: 64
+      hid_channels: 64
+      out_channels: 3
+
+dataset:
+  train_options:
+    name: CoCoDataset
+    options:
+      mode: train
+      image_size: -1
+      aug_ratio: 1
+      return_tensor: True
+      length_of_dataset: -1
+  valid_options:
+    name: CoCoDataset
+    options:
+      mode: val
+      image_size: -1
+      aug_ratio: 0
+      return_tensor: True
+      length_of_dataset: -1
+
+dataloader:
+  train_options:
+    batch_size: -1
+    num_workers: 24
+  valid_options:
+    batch_size: -1
+    num_workers: 24
+    shuffle: False
+    drop_last: False
+
+optimizer:
+  name: AdamW
+  options:
+    lr: 1.0e-3
+    betas: [0.9, 0.999]
+    weight_decay: 0.1
+
+lr_scheduler:
+  name: PolynomialLRWarmup
+  options:
+    warmup_iters: -1
+    total_iters: -1
+  pl_options:
+    monitor: loss
+    interval: step
+
+# lr_scheduler:
+#   name: MultiStepLRWarmUp
+#   options:
+#     warmup_milestone: 100
+#     milestones: [1000000, 2000000]
+#     gamma: 0.316227766
+#   pl_options:
+#     monitor: loss
+#     interval: step
+
+callbacks:
+  - name: ModelCheckpoint
+    options:
+      monitor: val_mean_iou
+      mode: max
+      verbose: True
+      save_last: True
+      save_top_k: 5
+  - name: LearningRateMonitor
+    options:
+      logging_interval: step
+  - name: RichModelSummary
+    options:
+      max_depth: 3
+  - name: CustomTQDMProgressBar
+    options:
+      unit_scale: -1
+
+logger:
+  name: TensorBoardLogger
+  options:
+    save_dir: logger

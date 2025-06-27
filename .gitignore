@@ -196,4 +196,5 @@ cython_debug/
 
 
 data/coco
-tmp
+tmp*
+yolov1/

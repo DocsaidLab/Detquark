@@ -11,7 +11,7 @@ docker run \
     -it --rm vireon_train bash -c "
 echo '
 from fire import Fire
-from Vireon.model import main_train
+from Vireon import main_train
 
 if __name__ == \"__main__\":
     Fire(main_train)
