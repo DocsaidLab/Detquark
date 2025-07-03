@@ -7,7 +7,7 @@ common:
   restore_all_states: False
 
 global_settings:
-  image_size: [448, 448]
+  image_size: [416, 416]
 
 trainer:
   max_epochs: 200
@@ -23,22 +23,22 @@ model:
   backbone:
     name: Backbone
     options:
-      name: timm_darknet17
-      pretrained: False
+      name: timm_lcnet_100
+      pretrained: True
       features_only: True
   head:
     name: YOLOv1Head
     options:
-      in_channels: 1024
+      in_channels: 512
       num_classes: 80
       num_bboxes: 2
-      grid_size: 14
+      grid_size: 13
   loss:
     name: YOLOv1Loss
     options:
-      S: 14
-      B: 2
-      C: 80
+      grid_size: 13
+      num_boxes: 2
+      num_classes: 80
       lambda_coord: 5.0
       lambda_noobj: 0.5
 
@@ -77,24 +77,24 @@ optimizer:
     betas: [0.9, 0.999]
     weight_decay: 0.0001
 
-# lr_scheduler:
-#   name: PolynomialLRWarmup
-#   options:
-#     warmup_iters: -1
-#     total_iters: -1
-#   pl_options:
-#     monitor: loss
-#     interval: step
-
 lr_scheduler:
-  name: MultiStepLRWarmUp
+  name: PolynomialLRWarmup
   options:
-    warmup_milestone: 5000
-    milestones: [1000000, 2000000]
-    gamma: 0.316227766
+    warmup_iters: -1
+    total_iters: -1
   pl_options:
     monitor: loss
     interval: step
+
+# lr_scheduler:
+#   name: MultiStepLRWarmUp
+#   options:
+#     warmup_milestone: 5000
+#     milestones: [1000000, 2000000]
+#     gamma: 0.316227766
+#   pl_options:
+#     monitor: loss
+#     interval: step
 
 callbacks:
   - name: ModelCheckpoint

@@ -74,7 +74,7 @@ class CustomTQDMProgressBar(TQDMProgressBar):
         )
 
     # --------------------------------------------------------------------- #
-    # Lightning‑hooked factory methods
+    # Lightning-hooked factory methods
     # --------------------------------------------------------------------- #
     def init_sanity_tqdm(self) -> Tqdm:
         return self.create_tqdm(
