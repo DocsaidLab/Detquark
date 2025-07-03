@@ -7,10 +7,10 @@ import torch
 import torch.nn as nn
 from capybara import get_curdir, now, write_metadata_into_onnx
 from chameleon import calculate_flops
-from otter import load_model_from_config
 
 from . import dataset as ds
 from . import model as net
+from .utils import load_model_from_config
 
 DIR = get_curdir(__file__)
 

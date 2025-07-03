@@ -1,3 +1,5 @@
+import json
+import textwrap
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
@@ -6,8 +8,8 @@ import lightning.pytorch.callbacks as pl_callbacks
 import lightning.pytorch.loggers as pl_loggers
 import natsort
 import torch.nn as nn
-from capybara import (PowerDict, colorstr, dump_json, get_curdir, get_files,
-                      get_gpu_cuda_versions, get_package_versions,
+from capybara import (COLORSTR, PowerDict, colorstr, dump_json, get_curdir,
+                      get_files, get_gpu_cuda_versions, get_package_versions,
                       get_system_info, now)
 from torch.utils.data import DataLoader
 
@@ -94,8 +96,9 @@ def load_model_from_config(
             raise FileNotFoundError(
                 f"Resolved checkpoint not found: {ckpt_path}")
 
+        ckpt_path = colorstr(str(ckpt_path), COLORSTR.YELLOW)
         print(
-            f"[INFO] Loading model from checkpoint: {colorstr(str(ckpt_path))}")
+            f"[INFO] Loading model from checkpoint: {ckpt_path}")
         model = ModelClass.load_from_checkpoint(
             checkpoint_path=str(ckpt_path),
             cfg=cfg,
@@ -108,8 +111,10 @@ def load_model_from_config(
     # 7. Otherwise instantiate a new model
     else:
         model = ModelClass(cfg=cfg)
+        model_name = colorstr(model_name, COLORSTR.YELLOW)
+        cfg_name = colorstr(cfg_name + '.yaml', COLORSTR.YELLOW)
         print(
-            f"[INFO] Initialized new model '{model_name}' with config '{cfg_name}.yaml'")
+            f"[INFO] Initialized new model {model_name} with config {cfg_name}")
 
     return model, cfg
 
@@ -150,12 +155,16 @@ def build_logger(cfg):
     # Instantiate the logger
     LoggerCls = getattr(pl_loggers, logger_name)
     logger = LoggerCls(**options)
-    print(f"[INFO] Initialized logger '{logger_name}'.")
-    print(f"[INFO] Saving configuration to {save_path / 'config.json'}")
+
+    logger_name = colorstr(logger_name, COLORSTR.YELLOW)
+    c_save_path = colorstr(str(save_path) + 'config.json', COLORSTR.YELLOW)
+
+    print(f"[INFO] Initialized logger {logger_name}.")
+    print(f"[INFO] Saving configuration to {c_save_path}")
 
     # Dump the full cfg to JSON for reproducibility
     dump_json(cfg, save_path / "config.json")
-    print("[INFO] Configuration file saved.")
+    print(colorstr("[INFO] Configuration file saved.", COLORSTR.GREEN))
 
     return logger
 
@@ -202,7 +211,12 @@ def build_callbacks(cfg: PowerDict) -> List[pl_callbacks.Callback]:
         # Instantiate the callback
         CallbackClass = getattr(pl_callbacks, name)
         callback = CallbackClass(**options)
-        print(f"[INFO] Registered callback: {name} with options {options}")
+        options_str = json.dumps(options, indent=2, ensure_ascii=False)
+        options_str = textwrap.indent(options_str, '            ')
+        options_str = colorstr(options_str, COLORSTR.CYAN)
+        name = colorstr(name, COLORSTR.CYAN)
+        print(
+            f"[INFO] Registered callback: {name} with options:\n{options_str}")
 
         callbacks.append(callback)
 
@@ -310,10 +324,13 @@ def build_trainer(
     # 2. Configure and create logging directory
     log_dir = experiment_dir / cfg.logger.options.get("save_dir", "logs")
     log_dir.mkdir(parents=True, exist_ok=True)
-    cfg.common["root_dir"] = str(experiment_dir)
+    cfg["root_dir"] = str(experiment_dir)
     cfg.logger.options["save_dir"] = str(log_dir)
+
+    experiment_dir = colorstr(experiment_dir, COLORSTR.YELLOW)
+    c_log_dir = colorstr(log_dir, COLORSTR.YELLOW)
     print(f"[INFO] Experiment directory: {experiment_dir}")
-    print(f"[INFO] Log directory: {log_dir}")
+    print(f"[INFO] Log directory: {c_log_dir}")
 
     # 3. Build callbacks and logger
     callbacks = build_callbacks(cfg)
@@ -330,6 +347,8 @@ def build_trainer(
     for filename, info in metadata.items():
         filepath = log_dir / filename
         dump_json(info, filepath)
+
+        filepath = colorstr(filepath, COLORSTR.YELLOW)
         print(f"[INFO] Saved metadata file: {filepath}")
 
     # 5. Instantiate and return the Trainer
@@ -338,5 +357,7 @@ def build_trainer(
         callbacks=callbacks,
         **cfg.trainer
     )
-    print("[INFO] Lightning Trainer initialized successfully.")
+    print(
+        colorstr("[INFO] Lightning Trainer initialized successfully.", COLORSTR.GREEN))
+
     return trainer

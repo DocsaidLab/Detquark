@@ -1,4 +1,5 @@
 import sys
+from typing import Any, Iterable, List, Optional
 
 from lightning.pytorch.callbacks import TQDMProgressBar
 from lightning.pytorch.callbacks.progress.tqdm_progress import Tqdm
@@ -13,10 +14,10 @@ class CustomTQDMProgressBar(TQDMProgressBar):
 
     def __init__(
         self,
-        unit_scale: float = 1.0,
-        *args,
-        **kwargs
-    ):
+        unit_scale: float | bool = 1.0,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
         """
         Args:
             unit_scale: Factor to scale the progress "unit" (e.g., samples per iteration).
@@ -25,26 +26,42 @@ class CustomTQDMProgressBar(TQDMProgressBar):
         super().__init__(*args, **kwargs)
         self.unit_scale = unit_scale
 
+    # --------------------------------------------------------------------- #
+    # Internal helpers
+    # --------------------------------------------------------------------- #
+    @staticmethod
+    def _resolve_total(total: Any) -> Optional[int]:
+        """
+        1. 如果是 list / tuple → 回傳其總和（支援多 dataloader 情況）
+        2. 如果是 float('inf') → 回傳 None 代表「未知長度」
+        3. 其它型別（int / None）原樣回傳
+        """
+        if total is None:
+            return None
+        if isinstance(total, (list, tuple)):
+            # 過濾掉 None / inf，避免 sum() 出錯
+            try:
+                total = sum(int(t)
+                            for t in total if t not in (None, float("inf")))
+            except (TypeError, ValueError):
+                total = None
+        elif total == float("inf"):
+            total = None
+        return int(total) if total is not None else None
+
     def create_tqdm(
         self,
         desc: str,
         leave: bool,
         position_offset: int = 0,
-        total: int | None = None,
+        total: Any = None,
     ) -> Tqdm:
         """
-        Internal helper to instantiate a Tqdm bar with standard settings.
-
-        Args:
-            desc: Description label for the progress bar.
-            leave: Whether to leave the bar displayed after completion.
-            position_offset: Additional offset for bar positioning.
-            total: Optional total number of steps for the bar.
-
-        Returns:
-            Configured Tqdm instance.
+        Instantiate a Tqdm bar with unified styling.
         """
         position = 2 * self.process_position + position_offset
+        total = self._resolve_total(total)
+
         return Tqdm(
             desc=desc,
             position=position,
@@ -56,18 +73,21 @@ class CustomTQDMProgressBar(TQDMProgressBar):
             total=total,
         )
 
+    # --------------------------------------------------------------------- #
+    # Lightning‑hooked factory methods
+    # --------------------------------------------------------------------- #
     def init_sanity_tqdm(self) -> Tqdm:
         return self.create_tqdm(
             desc=self.sanity_check_description,
             leave=False,
-            total=getattr(self.trainer, 'num_sanity_val_steps', None),
+            total=getattr(self.trainer, "num_sanity_val_steps", None),
         )
 
     def init_train_tqdm(self) -> Tqdm:
         return self.create_tqdm(
             desc=self.train_description,
             leave=True,
-            total=getattr(self.trainer, 'num_training_batches', None),
+            total=getattr(self.trainer, "num_training_batches", None),
         )
 
     def init_validation_tqdm(self) -> Tqdm:
@@ -76,19 +96,19 @@ class CustomTQDMProgressBar(TQDMProgressBar):
             desc=self.validation_description,
             leave=not has_main_bar,
             position_offset=int(has_main_bar),
-            total=getattr(self.trainer, 'num_val_batches', None),
+            total=getattr(self.trainer, "num_val_batches", None),
         )
 
     def init_test_tqdm(self) -> Tqdm:
         return self.create_tqdm(
             desc=self.test_description,
             leave=True,
-            total=getattr(self.trainer, 'num_test_batches', None),
+            total=getattr(self.trainer, "num_test_batches", None),
         )
 
     def init_predict_tqdm(self) -> Tqdm:
         return self.create_tqdm(
             desc=self.predict_description,
             leave=True,
-            total=getattr(self.trainer, 'num_predict_batches', None),
+            total=getattr(self.trainer, "num_predict_batches", None),
         )

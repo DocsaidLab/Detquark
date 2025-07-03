@@ -39,6 +39,7 @@ class BaseMixin(L.LightningModule):
             params=self.get_optimizer_params(),
             **self.optimizer_opts
         )
+
         scheduler = build_optimizer(
             name=self.sche_name,
             optimizer=optimizer,

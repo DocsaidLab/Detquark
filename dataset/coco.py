@@ -105,7 +105,7 @@ class CoCoDataset:
         image_size: Tuple[int, int] = (640, 640),
         transform: Callable = None,
         aug_ratio: float = 0,
-        to_tensor: bool = False,
+        return_tensor: bool = False,
         **kwargs
     ) -> None:
 
@@ -116,7 +116,7 @@ class CoCoDataset:
         self.root = Path(root) if root else DIR.parent / "data"
         self.mode = mode
         self.image_size = image_size
-        self.to_tensor = to_tensor
+        self.return_tensor = return_tensor
 
         self.transform = DetectionImageAug(
             image_size=self.image_size,
@@ -211,7 +211,7 @@ class CoCoDataset:
                 )
             )
 
-            if len(dataset) > 10:
+            if len(dataset) > 1000:
                 break
 
         return dataset
@@ -302,17 +302,17 @@ class CoCoDataset:
             labels=labels
         )
 
+        boxes = np.asarray(boxes,  dtype=np.float32).reshape(-1, 4)
+        labels = np.asarray(labels, dtype=np.int64)
+
         #
-        if self.to_tensor:
-            img = np.transpose(img, (2, 0, 1))
-            img = img.astype(np.float32) / 255.
+        if self.return_tensor:
+            img = np.transpose(img, (2, 0, 1)).astype(np.float32) / 255.
 
             ih, iw = self.image_size
-            boxes[:, [0, 2]] /= iw
-            boxes[:, [1, 3]] /= ih
-            boxes = boxes.astype(np.float32)
-
-            labels = labels.astype(np.int64)
+            if boxes.size:
+                boxes[:, [0, 2]] /= iw
+                boxes[:, [1, 3]] /= ih
 
         return {
             'img': img,
@@ -325,7 +325,7 @@ class CoCoDataset:
         }
 
 
-def detection_collate_fn(batch: List[Dict[str, Any]]):
+def coco_collate_fn(batch: List[Dict[str, Any]]):
     """
     Collate function for object‑detection batches.
 
@@ -351,10 +351,7 @@ def detection_collate_fn(batch: List[Dict[str, Any]]):
     # Stack images
     imgs = []
     for sample in batch:
-        img = sample['img']
-        if isinstance(img, np.ndarray):
-            # assume HWC uint8 or float, convert to float32 tensor
-            img = torch.from_numpy(img).permute(2, 0, 1).float() / 255.0
+        img = torch.from_numpy(sample['img']).float()
         imgs.append(img)
     imgs = torch.stack(imgs, dim=0)
 

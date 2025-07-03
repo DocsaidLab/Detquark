@@ -48,13 +48,3 @@ class Neck(nn.Module):
 
     def forward(self, xs: List[torch.Tensor]) -> torch.Tensor:
         return self.neck(xs)
-
-
-class YOLOv1Head(nn.Module):
-
-    def __init__(self, **kwargs):
-        super().__init__()
-        self.tmp = nn.Linear(10, 10)
-
-    def forward(self, xs: List[torch.Tensor]) -> torch.Tensor:
-        return xs

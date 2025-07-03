@@ -1,14 +1,17 @@
+import json
+import textwrap
 from pathlib import Path
-from pprint import pprint
 
 import cv2
 import torch
 from capybara import dump_json, get_curdir
 from chameleon import calculate_flops
+from rich.console import Console
+from rich.table import Table
 
 from . import dataset as ds
 from . import model as net
-from .dataset import detection_collate_fn
+from .dataset import coco_collate_fn
 from .utils import build_dataloaders, build_trainer, load_model_from_config
 
 DIR = get_curdir(__file__)
@@ -17,6 +20,18 @@ DIR = get_curdir(__file__)
 cv2.setNumThreads(0)
 torch.set_num_threads(1)
 torch.set_float32_matmul_precision('medium')
+
+
+def print_meta_data_rich(meta_data):
+    console = Console()
+    console.rule("[bold cyan]MODEL META DATA")
+    table = Table(show_header=True, header_style="bold magenta")
+    table.add_column("Metric", justify="right")
+    table.add_column("Value", justify="left")
+    for k, v in meta_data.items():
+        table.add_row(k, str(v))
+    console.print(table)
+    console.rule()
 
 
 def main_train(cfg_name: str) -> None:
@@ -45,7 +60,7 @@ def main_train(cfg_name: str) -> None:
 
     # 2. Build data loaders
     train_loader, valid_loader = build_dataloaders(
-        cfg, ds, collate_fn=detection_collate_fn)
+        cfg, ds, collate_fn=coco_collate_fn)
 
     # 3. Adjust warmup for PolynomialLRWarmup scheduler
     if cfg.lr_scheduler.name == 'PolynomialLRWarmup':
@@ -82,7 +97,7 @@ def main_train(cfg_name: str) -> None:
     )
     meta_data = {'FLOPs': flops, 'MACs': macs, 'Params': params}
     dump_json(meta_data, log_dir / 'model_meta_data.json')
-    pprint(meta_data)
+    print_meta_data_rich(meta_data)
 
     # 7. Start training
     checkpoint = cfg.common.checkpoint_path if getattr(

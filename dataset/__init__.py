@@ -1,1 +1,1 @@
-from .coco import CoCoDataset, detection_collate_fn
+from .coco import CoCoDataset, coco_collate_fn
