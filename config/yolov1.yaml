@@ -10,7 +10,7 @@ global_settings:
   image_size: [448, 448]
 
 trainer:
-  max_epochs: 50
+  max_epochs: 200
   precision: bf16-mixed
   val_check_interval: 1.0
   gradient_clip_val: 5
@@ -75,7 +75,7 @@ optimizer:
   options:
     lr: 1.0e-3
     betas: [0.9, 0.999]
-    weight_decay: 0.1
+    weight_decay: 0.0001
 
 # lr_scheduler:
 #   name: PolynomialLRWarmup
@@ -89,7 +89,7 @@ optimizer:
 lr_scheduler:
   name: MultiStepLRWarmUp
   options:
-    warmup_milestone: 100
+    warmup_milestone: 5000
     milestones: [1000000, 2000000]
     gamma: 0.316227766
   pl_options:

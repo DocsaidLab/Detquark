@@ -211,9 +211,6 @@ class CoCoDataset:
                 )
             )
 
-            if len(dataset) > 1000:
-                break
-
         return dataset
 
     def __len__(self) -> int:

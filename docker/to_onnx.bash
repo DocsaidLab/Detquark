@@ -7,11 +7,11 @@ docker run \
     --shm-size=64g \
     --ipc=host --net=host \
     --cpuset-cpus="0-31" \
-    -v $PWD/Vireon:/code/Vireon \
-    -it --rm vireon_train bash -c "
+    -v $PWD/Detquark:/code/Detquark \
+    -it --rm detquark_train bash -c "
 echo '
 from fire import Fire
-from Vireon.model import main_torch2onnx
+from Detquark.model import main_torch2onnx
 
 if __name__ == \"__main__\":
     Fire(main_classifier_torch2onnx)
