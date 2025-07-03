@@ -1,3 +1,4 @@
+import inspect
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Tuple, Union
 
@@ -7,53 +8,59 @@ import cv2
 import numpy as np
 import torch
 
+# Determine current directory of this script
 DIR = cb.get_curdir(__file__)
 
 
 class DetectionImageAug:
+    """
+    Apply pixel-level and spatial augmentations to detection images.
 
-    def __init__(self, image_size: Tuple[int, int], p=0.5):
+    Args:
+        image_size (Tuple[int, int]): Target image height and width.
+        p (float): Probability of applying the augmentation pipeline.
+    """
+
+    def __init__(self, image_size: Tuple[int, int], p: float = 0.5):
         h, w = image_size
 
+        # Define pixel-based transforms (noise, blur, color jitter)
         self.pixel_transform = A.Compose(
             transforms=[
                 A.OneOf([
                     A.GaussianBlur(),
-                    A.MotionBlur(),
+                    A.MotionBlur()
                 ]),
                 A.OneOf([
                     A.ISONoise(),
-                    A.GaussNoise(),
+                    A.GaussNoise()
                 ]),
                 A.OneOf([
                     A.Emboss(),
                     A.Equalize(),
-                    A.RandomSunFlare(src_radius=120),
+                    A.RandomSunFlare(src_radius=120)
                 ]),
                 A.OneOf([
                     A.ToGray(),
                     A.InvertImg(),
-                    A.ChannelShuffle(),
+                    A.ChannelShuffle()
                 ]),
                 A.ColorJitter(),
             ],
             p=p
         )
 
-        self.spacial_transform = A.Compose(
+        # Define spatial transforms that also adjust bounding boxes
+        self.spatial_transform = A.Compose(
             transforms=[
-                A.RandomSizedBBoxSafeCrop(
-                    height=h,
-                    width=w,
-                    p=p
-                ),
+                A.RandomSizedBBoxSafeCrop(height=h, width=w, p=p),
                 A.ShiftScaleRotate(
                     shift_limit=0,
                     rotate_limit=45,
                     border_mode=cv2.BORDER_CONSTANT,
                     p=p
                 ),
-                A.RandomRotate90(),
+                A.RandomRotate90(p=p),
                 A.Perspective(
                     scale=(0.05, 0.5),
                     keep_size=True,
@@ -64,7 +71,7 @@ class DetectionImageAug:
             ],
             p=p,
             bbox_params=A.BboxParams(
-                format='pascal_voc',
+                format='pascal_voc',    # (x_min, y_min, x_max, y_max)
                 label_fields=['labels']
             )
         )
@@ -74,24 +81,33 @@ class DetectionImageAug:
         image: np.ndarray,
         bboxes: np.ndarray,
         labels: np.ndarray,
-    ):
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Apply augmentations to the image and its corresponding bounding boxes and labels.
+
+        Returns:
+            Tuple containing the augmented image, bounding boxes, and labels.
+        """
+        # Apply pixel-level transforms
         image = self.pixel_transform(image=image)['image']
-        image, bboxes, labels = self.spacial_transform(
+        # Apply spatial transforms (affects image, bboxes, labels)
+        transformed = self.spatial_transform(
             image=image,
             bboxes=bboxes,
             labels=labels
-        ).values()
-        return image, bboxes, labels
+        )
+        return transformed['image'], np.array(transformed['bboxes']), np.array(transformed['labels'])
 
 
 class CoCoDataset:
     """
-    A light weight dataset loader for COCO style splits + YOLO txt labels.
+    Lightweight COCO-style dataset loader that supports YOLO-format labels.
 
-    每行標註格式：
-        cls x1 y1 x2 y2 ...   # 4 or 2k floats (k ≥ 2), **皆為 0~1 範圍**
+    Each annotation line:
+        class x1 y1 x2 y2 ...    # Coordinates normalized to [0,1]
     """
 
+    # Mapping of dataset splits to file lists and directory names
     SPLITS = {
         "train": ("train2017.txt",  "train2017"),
         "val":   ("val2017.txt",    "val2017"),
@@ -101,99 +117,132 @@ class CoCoDataset:
     def __init__(
         self,
         root: Union[str, Path] = None,
-        mode: str = 'train',  # 'train' | 'val' | 'test'
+        mode: str = 'train',               # One of 'train', 'val', 'test'
         image_size: Tuple[int, int] = (640, 640),
-        transform: Callable = None,
-        aug_ratio: float = 0,
-        return_tensor: bool = False,
+        transform: Callable = None,        # Augmentation callable
+        aug_ratio: float = 0.0,            # Probability for default augmentations
+        return_tensor: bool = False,       # Return tensor or numpy
         **kwargs
     ) -> None:
-
+        # Validate dataset mode
         if mode not in self.SPLITS:
             raise ValueError(
-                f"`mode` must be {list(self.SPLITS)}, but get `{mode}`")
+                f"`mode` must be one of {list(self.SPLITS)}, got '{mode}'")
 
+        # Set root directory to user-specified or default data folder
         self.root = Path(root) if root else DIR.parent / "data"
         self.mode = mode
         self.image_size = image_size
         self.return_tensor = return_tensor
 
-        self.transform = DetectionImageAug(
-            image_size=self.image_size,
-            p=aug_ratio
-        )
+        # Assign transform: use default DetectionImageAug if none provided
+        if transform is None:
+            self.transform = DetectionImageAug(
+                image_size=self.image_size, p=aug_ratio)
+        else:
+            self._check_transform(transform)
+            self.transform = transform
 
-        # Implement the following in the subclass
+        # Build the dataset list of dict entries
         self.dataset: List[Dict] = self._build_dataset()
 
-    def _parse_line(self, line: str) -> tuple[int, np.ndarray]:
+    def _check_transform(self, transform: Callable) -> None:
         """
-        將一行文字解析成 (class, bbox)。
-        bbox 為 [x_min,y_min,x_max,y_max]，皆為 0~1 浮點。
+        Validate a user-provided transform callable for compatibility.
+
+        Requirements:
+          1. Must be a callable instance, not a class/type.
+          2. Must accept keyword args: image, bboxes, labels.
+          3. Must return a tuple: (image, bboxes, labels).
+        """
+        if not callable(transform) or inspect.isclass(transform):
+            raise TypeError(
+                "`transform` must be an instantiated callable, not a class/type.")
+        sig = inspect.signature(transform)
+        if not {'image', 'bboxes', 'labels'}.issubset(sig.parameters):
+            raise ValueError(
+                "`transform` must accept keyword args 'image', 'bboxes', 'labels'.")
+
+        # Test transform with dummy data
+        h, w = self.image_size
+        dummy_img = np.zeros((h, w, 3), dtype=np.uint8)
+        dummy_bboxes = np.zeros((0, 4), dtype=np.float32)
+        dummy_labels = np.zeros((0,), dtype=np.int64)
+        try:
+            out = transform(image=dummy_img,
+                            bboxes=dummy_bboxes, labels=dummy_labels)
+        except Exception as e:
+            raise ValueError(f"`transform` call failed: {e}")
+        if not (isinstance(out, tuple) and len(out) == 3):
+            raise ValueError(
+                "`transform` must return a tuple (image, bboxes, labels).")
+
+    def _parse_line(self, line: str) -> Tuple[int, np.ndarray]:
+        """
+        Parse a single annotation line into class and bounding box.
+
+        Returns:
+            cls (int): Class index.
+            box (np.ndarray): [x_min, y_min, x_max, y_max] normalized to [0,1].
         """
         parts = line.strip().split()
         if len(parts) < 5:
-            raise ValueError("標註長度不足 5 個元素")
+            raise ValueError("Annotation line must have at least 5 elements.")
 
+        # First element is class, remaining are coordinates
         cls = int(parts[0])
-        coords = np.asarray(list(map(float, parts[1:])), dtype=np.float32)
+        coords = np.array(list(map(float, parts[1:])), dtype=np.float32)
 
+        # If 4 coords: assume (cx, cy, w, h) format
         if coords.size == 4:
-            # (cx, cy, w, h) -> (xmin, ymin, xmax, ymax)
             cx, cy, w, h = coords
             x_min = cx - w / 2
             y_min = cy - h / 2
             x_max = cx + w / 2
             y_max = cy + h / 2
             box = np.array([x_min, y_min, x_max, y_max], dtype=np.float32)
-
         else:
-            # 多邊形 (x1,y1, x2,y2, …) -> 外接方框
-            xs = coords[0::2]
-            ys = coords[1::2]
-            box = np.array(
-                [xs.min(), ys.min(), xs.max(), ys.max()], dtype=np.float32
-            )
+            # If more coords: assume polygon, compute bounding box
+            xs, ys = coords[0::2], coords[1::2]
+            box = np.array([min(xs), min(ys), max(xs),
+                           max(ys)], dtype=np.float32)
 
-        # clip 到 [0,1] 以防極端值
-        box = np.clip(box, 0.0, 1.0)
+        # Clip coordinates to [0,1]
+        return cls, np.clip(box, 0.0, 1.0)
 
-        return cls, box
+    def _build_dataset(self) -> List[Dict[str, Any]]:
+        """
+        Scan image list and corresponding label files to build dataset entries.
 
-    def _build_dataset(self) -> List[Dict]:
-
-        # 讀取「檔名清單」
+        Each entry contains:
+            img_path, width, height, bboxes, labels
+        """
         fs_name, label_dir = self.SPLITS[self.mode]
-        txt_list = self.root / "coco" / fs_name
-        txt_list = txt_list.read_text().strip().splitlines()
+        txt_list = (self.root / "coco" / fs_name).read_text().splitlines()
 
         dataset = []
-        for rel in cb.Tqdm(txt_list, desc=f"Scanning {self.mode} set"):
+        for rel in cb.Tqdm(txt_list, desc=f"Scanning {self.mode} split"):
             img_path = self.root / "coco" / rel
             label_path = self.root / "coco" / "labels" / \
                 label_dir / Path(rel).with_suffix(".txt").name
 
             img = cb.imread(img_path)
             if img is None:
-                print(f"[WARNING] 讀不到影像：{img_path}")
+                print(f"[WARNING] Could not load image: {img_path}")
                 continue
             h, w = img.shape[:2]
 
-            # 解析標註
+            # Parse label file if it exists
             if label_path.exists():
-                lines = label_path.read_text().strip().splitlines()
                 infos = []
-                for ln in lines:
+                for ln in label_path.read_text().splitlines():
                     try:
-                        cls, box = self._parse_line(ln)
-                        infos.append((cls, box))
+                        infos.append(self._parse_line(ln))
                     except Exception as e:
-                        print(f"[WARNING] {label_path.name} 異常行：{ln} ({e})")
+                        print(f"[WARNING] Invalid annotation {ln}: {e}")
                 if infos:
-                    classes = np.fromiter(
-                        (c for c, _ in infos), dtype=np.int64, count=len(infos))
-                    bboxes = np.stack([b for _, b in infos],
-                                      axis=0)         # (N,4) 0‑1
+                    classes = np.array([c for c, _ in infos], dtype=np.int64)
+                    bboxes = np.vstack([b for _, b in infos])
                 else:
                     classes = np.empty((0,), dtype=np.int64)
                     bboxes = np.empty((0, 4), dtype=np.float32)
@@ -201,112 +250,108 @@ class CoCoDataset:
                 classes = np.empty((0,), dtype=np.int64)
                 bboxes = np.empty((0, 4), dtype=np.float32)
 
-            dataset.append(
-                dict(
-                    img_path=img_path,
-                    width=w,
-                    height=h,
-                    bboxes=bboxes,
-                    labels=classes,
-                )
-            )
+            dataset.append({
+                'img_path': img_path,
+                'width': w,
+                'height': h,
+                'bboxes': bboxes,
+                'labels': classes,
+            })
 
         return dataset
 
     def __len__(self) -> int:
+        """Return number of dataset entries."""
         return len(self.dataset)
 
     def _pad(
         self,
         img: np.ndarray,
         boxes: np.ndarray,
-    ) -> Tuple[np.ndarray, np.ndarray, Tuple[int, int, int, int]]:
+    ) -> Tuple[np.ndarray, np.ndarray]:
         """
-        將圖像補成正方形，並調整 bbox 座標。
-
-        Args:
-            img (np.ndarray): 原始圖像 (H, W, C)
-            boxes (np.ndarray): (N, 4), xyxy 格式的絕對座標
+        Pad image to square shape and adjust bounding boxes accordingly.
 
         Returns:
-            padded_img (np.ndarray): 補成正方形後的圖像
-            padded_boxes (np.ndarray): 調整後的 boxes[xyxy]
+            padded_img   : Image padded to max(height, width).
+            padded_boxes : Boxes shifted by padding offsets.
         """
         h, w = img.shape[:2]
         size = max(h, w)
+        pad_h, pad_w = size - h, size - w
+        top, bottom = pad_h // 2, pad_h - (pad_h // 2)
+        left, right = pad_w // 2, pad_w - (pad_w // 2)
 
-        pad_h = size - h
-        pad_w = size - w
-        top = pad_h // 2
-        bottom = pad_h - top
-        left = pad_w // 2
-        right = pad_w - left
-
-        # Padding image
         padded_img = cv2.copyMakeBorder(
-            img,
-            top, bottom, left, right,
+            img, top, bottom, left, right,
             borderType=cv2.BORDER_CONSTANT,
             value=(0, 0, 0)
         )
 
-        # Adjust bbox
+        # Update box coordinates
         padded_boxes = boxes.copy()
         padded_boxes[:, [0, 2]] += left
         padded_boxes[:, [1, 3]] += top
-
         return padded_img, padded_boxes
 
     def _resize(self, img: np.ndarray, boxes: np.ndarray):
-
+        """
+        Resize image and scale bounding boxes to new dimensions.
+        """
         if self.image_size is None:
             return img, boxes
 
         h0, w0 = img.shape[:2]
         new_w, new_h = self.image_size
-
         if (h0, w0) == (new_h, new_w):
             return img, boxes
 
         scale_x, scale_y = new_w / w0, new_h / h0
         img = cb.imresize(img, size=(new_h, new_w),
                           interpolation=cb.INTER.BILINEAR)
-
         boxes[:, [0, 2]] *= scale_x
         boxes[:, [1, 3]] *= scale_y
-
         return img, boxes
 
-    def __getitem__(self, idx) -> Tuple[np.ndarray, np.ndarray]:
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        """
+        Retrieve and process a dataset entry by index.
 
+        Steps:
+            1. Load image and raw labels.
+            2. Convert normalized boxes to absolute coords.
+            3. Pad and resize image/boxes.
+            4. Apply transforms.
+            5. Optionally normalize and convert to tensors.
+        """
         infos = self.dataset[idx]
 
         img = cb.imread(infos['img_path'])
         labels = infos['labels']
-        boxes = infos['bboxes']
+        boxes = infos['bboxes'].copy()
 
+        # Convert normalized boxes to pixel coords
         boxes[:, [0, 2]] *= infos['width']
         boxes[:, [1, 3]] *= infos['height']
 
-        # pad & resize
+        # Pad and resize
         img, boxes = self._pad(img, boxes)
         img, boxes = self._resize(img, boxes)
 
-        # image aug
+        # Apply augmentations
         img, boxes, labels = self.transform(
-            image=img,
-            bboxes=boxes,
-            labels=labels
-        )
+            image=img, bboxes=boxes, labels=labels)
 
-        boxes = np.asarray(boxes,  dtype=np.float32).reshape(-1, 4)
-        labels = np.asarray(labels, dtype=np.int64)
+        # Ensure correct shapes
+        boxes = boxes.reshape(-1, 4).astype(np.float32)
+        labels = labels.astype(np.int64)
 
-        #
         if self.return_tensor:
-            img = np.transpose(img, (2, 0, 1)).astype(np.float32) / 255.
+            # Convert image to CHW float32 tensor [0,1]
+            img = torch.from_numpy(img.transpose(2, 0, 1)).float() / 255.0
 
-            ih, iw = self.image_size
+            # Normalize boxes back to [0,1]
+            iw, ih = self.image_size
             if boxes.size:
                 boxes[:, [0, 2]] /= iw
                 boxes[:, [1, 3]] /= ih
@@ -324,46 +369,40 @@ class CoCoDataset:
 
 def coco_collate_fn(batch: List[Dict[str, Any]]):
     """
-    Collate function for object‑detection batches.
+    Collate function for DataLoader to batch detection samples.
 
     Args:
-        batch: List of samples, each is a dict with keys
-            'img'      : HWC np.ndarray or CHW tensor
-            'boxes'    : (N,4) np.ndarray of xyxy absolute coords
-            'labels'   : (N,)  np.ndarray of category IDs
+        batch (List[dict]): Each sample dict must contain:
+            'img'      : CHW tensor or HWC ndarray
+            'boxes'    : (N,4) ndarray of absolute coords
+            'labels'   : (N,) ndarray of class IDs
             'width'    : original image width
             'height'   : original image height
-            'img_size' : tuple (W,H) after resize
-            (others ignored)
+            'img_size' : (W,H) after resize
 
     Returns:
-        imgs:   Tensor of shape (B,3,H,W), float32
-        targets: List[dict], each with keys
-            'boxes'    : Tensor (N,4) float32
-            'labels'   : Tensor (N,)  int64
-            'image_id' : Tensor([i])     int64
-            'orig_size': Tensor([H0,W0]) int64
-            'size'     : Tensor([H,W])   int64
+        imgs   : Tensor (B,3,H,W)
+        targets: List[dict] with keys:
+            'boxes'    : Tensor (N,4)
+            'labels'   : Tensor (N,)
+            'image_id' : Tensor([i])
+            'orig_size': Tensor([H0,W0])
+            'size'     : Tensor([H,W])
     """
-    # Stack images
-    imgs = []
-    for sample in batch:
-        img = torch.from_numpy(sample['img']).float()
-        imgs.append(img)
-    imgs = torch.stack(imgs, dim=0)
+    # Stack images into a single tensor
+    imgs = torch.stack(
+        [torch.tensor(sample['img'], dtype=torch.float32) for sample in batch], dim=0)
 
-    # Build targets
-    targets: List[Dict[str, Any]] = []
+    targets = []
     for i, sample in enumerate(batch):
-        boxes = torch.from_numpy(sample['boxes']).float()
-        labels = torch.from_numpy(sample['labels']).long()
-        target = {
+        boxes = torch.tensor(sample['boxes'], dtype=torch.float32)
+        labels = torch.tensor(sample['labels'], dtype=torch.int64)
+        targets.append({
             'boxes': boxes,
             'labels': labels,
             'image_id': torch.tensor([i], dtype=torch.int64),
             'orig_size': torch.tensor([sample['height'], sample['width']], dtype=torch.int64),
             'size': torch.tensor(sample['img_size'], dtype=torch.int64),
-        }
-        targets.append(target)
+        })
 
     return imgs, targets
