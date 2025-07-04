@@ -8,7 +8,16 @@ import torchvision.ops as tv_ops
 class YOLOv1Head(nn.Module):
     """
     YOLOv1 detection head for object detection.
-    Predicts B bounding boxes and C class probabilities per SxS grid cell.
+
+    Attributes:
+        S (int): Number of grid cells along each image dimension.
+        B (int): Number of bounding boxes predicted per grid cell.
+        C (int): Number of object classes.
+        conv (nn.Module): Convolutional feature extractor.
+        fc (nn.Module): Fully connected layers to produce raw predictions.
+        grid_x (Tensor): X-coordinate offsets for each grid cell.
+        grid_y (Tensor): Y-coordinate offsets for each grid cell.
+        cell_size (Tensor): Normalized size of each grid cell (1/S).
     """
 
     def __init__(
@@ -20,20 +29,29 @@ class YOLOv1Head(nn.Module):
         dropout: float = 0.5,
         **kwargs
     ):
+        """
+        Initialize YOLOv1Head.
+
+        Args:
+            in_channels (int): Channels of input feature map.
+            num_classes (int): Number of object classes (C).
+            num_bboxes (int): Boxes per cell (B). Default is 2.
+            grid_size (int): Grid size (S). Default is 7.
+            dropout (float): Dropout probability after hidden layer. Default is 0.5.
+        """
         super().__init__()
         self.S = grid_size
         self.B = num_bboxes
         self.C = num_classes
 
-        # feature extractor: conv → batchnorm → LeakyReLU
-        # (paper did not include this extra conv+BN, remove here if you want exact reproduction)
+        # Extract and refine spatial features before prediction
         self.conv = nn.Sequential(
             nn.Conv2d(in_channels, 1024, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(1024),
             nn.LeakyReLU(0.1),
         )
 
-        # fully-connected head: flatten → FC → LeakyReLU → Dropout(0.5) → final FC
+        # Map extracted features to raw prediction vector
         self.fc = nn.Sequential(
             nn.Flatten(),
             nn.Linear(1024 * self.S * self.S, 4096),
@@ -42,7 +60,7 @@ class YOLOv1Head(nn.Module):
             nn.Linear(4096, self.S * self.S * (self.B * 5 + self.C)),
         )
 
-        # pre-compute grid offsets for decoding
+        # Precompute grid offsets and cell size for decoding
         gy, gx = torch.meshgrid(
             torch.arange(self.S), torch.arange(self.S), indexing="ij"
         )
@@ -52,15 +70,23 @@ class YOLOv1Head(nn.Module):
 
     def forward(self, features: List[torch.Tensor]) -> torch.Tensor:
         """
+        Run features through the detection head to produce raw predictions.
+
         Args:
-            features: list of intermediate features; use the last one (shape batchxC'xSxS)
+            features (List[Tensor]): List of intermediate feature maps; uses the last
+                one of shape (batch, C', S, S).
+
         Returns:
-            raw predictions tensor of shape (batch, S, S, B*5 + C)
+            Tensor: Raw predictions of shape (batch, S, S, B*5 + C).
+
+        Raises:
+            AssertionError: If feature map spatial size != S.
         """
         x = features[-1]
         batch_size, _, Hf, Wf = x.shape
+        # Ensure feature map matches expected grid size
         assert Hf == self.S and Wf == self.S, (
-            f"Expected feature map {self.S} x {self.S}, but got {Hf} x {Wf}"
+            f"Expected feature map {self.S}×{self.S}, got {Hf}×{Wf}"
         )
 
         x = self.conv(x)
@@ -77,43 +103,45 @@ class YOLOv1Head(nn.Module):
         max_det: int = 300,
     ) -> List[Dict[str, torch.Tensor]]:
         """
-        Decode raw network output into final detections per image.
+        Decode raw predictions into final detections.
 
         Args:
-            preds: (batch, S, S, B*5 + C)
-            img_size: (H, W) in pixels
-            conf_thres: objectness threshold
-            iou_thres: IoU threshold for NMS
-            max_det: max boxes per image
+            preds (Tensor): Raw output (batch, S, S, B*5 + C).
+            img_size (Tuple[int, int]): (height, width) of original image in pixels.
+            conf_thres (float): Threshold for objectness score.
+            iou_thres (float): IoU threshold for non-max suppression.
+            max_det (int): Maximum detections per image.
+
         Returns:
-            list of dicts with keys "boxes", "scores", "labels"
+            List[Dict[str, Tensor]]: Each dict has keys 'boxes', 'scores', 'labels'.
         """
         batch_size = preds.size(0)
         H, W = img_size
         device = preds.device
 
-        # split predictions
+        # ------------------------------------------------------------------
+        # 1. Split predictions into box parameters and class logits
+        # ------------------------------------------------------------------
         pred_boxes = preds[..., : self.B *
                            5].view(batch_size, self.S, self.S, self.B, 5)
-        pred_cls_logits = preds[..., self.B * 5:]  # (batch, S, S, C)
+        pred_cls_logits = preds[..., self.B * 5:]
 
-        # activations
-        tx = torch.sigmoid(pred_boxes[..., 0])
-        ty = torch.sigmoid(pred_boxes[..., 1])
-        raw_w = pred_boxes[..., 2]
-        raw_h = pred_boxes[..., 3]
-        # as in original paper: predict √w, √h → square to get w, h
-        tw = raw_w.pow(2)
-        th = raw_h.pow(2)
-        conf = torch.sigmoid(pred_boxes[..., 4])
-
+        # ------------------------------------------------------------------
+        # 2. Activate predictions
+        # ------------------------------------------------------------------
+        tx = torch.sigmoid(pred_boxes[..., 0])        # center x offset
+        ty = torch.sigmoid(pred_boxes[..., 1])        # center y offset
+        tw = pred_boxes[..., 2].pow(2)                # width
+        th = pred_boxes[..., 3].pow(2)                # height
+        conf = torch.sigmoid(pred_boxes[..., 4])      # objectness
         cls_probs = torch.softmax(pred_cls_logits, dim=-1)
 
-        # convert to absolute coords
+        # ------------------------------------------------------------------
+        # 3. Compute absolute box coordinates
+        # ------------------------------------------------------------------
         gx = self.grid_x.to(device)
         gy = self.grid_y.to(device)
         cs = self.cell_size.to(device)
-
         cx = (tx + gx) * cs
         cy = (ty + gy) * cs
 
@@ -122,7 +150,7 @@ class YOLOv1Head(nn.Module):
         x2 = (cx + tw / 2) * W
         y2 = (cy + th / 2) * H
 
-        # clamp to image
+        # Clamp coordinates to image boundaries
         x1 = x1.clamp(0, W)
         y1 = y1.clamp(0, H)
         x2 = x2.clamp(0, W)
@@ -133,12 +161,21 @@ class YOLOv1Head(nn.Module):
 
         results: List[Dict[str, torch.Tensor]] = []
         num_cells = self.S * self.S
+
+        # ------------------------------------------------------------------
+        # 4. Post-process each image: filter, score, NMS
+        # ------------------------------------------------------------------
         for bi in range(batch_size):
+            # Flatten grid and anchor dims
             boxes_flat = boxes_abs[bi].reshape(-1, 4)
             conf_flat = conf[bi].reshape(-1)
-            cls_cell = cls_probs[bi].reshape(num_cells, self.C)
-            cls_flat = cls_cell.repeat_interleave(self.B, dim=0)
+            cls_flat = (
+                cls_probs[bi]
+                .reshape(num_cells, self.C)
+                .repeat_interleave(self.B, dim=0)
+            )
 
+            # Filter low-confidence boxes
             mask = conf_flat > conf_thres
             if not mask.any():
                 results.append({
@@ -152,8 +189,9 @@ class YOLOv1Head(nn.Module):
             confs = conf_flat[mask].unsqueeze(1)
             cls_p = cls_flat[mask]
             cls_scores, cls_labels = cls_p.max(dim=1)
-            scores = (confs.squeeze(1) * cls_scores)
+            scores = confs.squeeze(1) * cls_scores
 
+            # Apply non-maximum suppression, limit to max_det
             keep = tv_ops.batched_nms(bboxes, scores, cls_labels, iou_thres)
             if keep.numel() > max_det:
                 keep = keep[:max_det]

@@ -1,4 +1,3 @@
-# yolov2_loss.py
 from typing import Dict, List, Tuple
 
 import torch
@@ -10,7 +9,20 @@ from .utils import build_targets_yolov2
 
 class YOLOv2Loss(nn.Module):
     """
-    Compute YOLOv2 loss: coordinate MSE, objectness BCE, class CrossEntropy.
+    YOLOv2 loss combining coordinate regression, objectness, and classification.
+
+    Attributes:
+        anchors (Tensor[A, 2]): Anchor box sizes in pixels.
+        anchor_w (Tensor[A]): Anchor widths normalized by image dimension.
+        anchor_h (Tensor[A]): Anchor heights normalized by image dimension.
+        num_classes (int): Number of object classes.
+        img_dim (int): Input image size in pixels.
+        lambda_coord (float): Weight for coordinate loss.
+        lambda_noobj (float): Weight for no-object confidence loss.
+        ignore_iou_thr (float): IoU threshold to ignore negative anchors.
+        mse (MSELoss): Sum-reduction mean squared error.
+        bce (BCEWithLogitsLoss): Sum-reduction binary cross-entropy.
+        ce (CrossEntropyLoss): Sum-reduction cross-entropy for classification.
     """
 
     def __init__(
@@ -22,14 +34,24 @@ class YOLOv2Loss(nn.Module):
         lambda_noobj: float = 0.5,
         ignore_iou_thr: float = 0.7,
     ):
+        """
+        Initialize YOLOv2Loss.
+
+        Args:
+            anchors (List[Tuple[float, float]]): Anchor sizes (w,h) in pixels.
+            num_classes (int): Number of object classes.
+            img_dim (int): Input image size (pixels). Default 416.
+            lambda_coord (float): Weight for coordinate loss. Default 5.0.
+            lambda_noobj (float): Weight for no-object loss. Default 0.5.
+            ignore_iou_thr (float): IoU threshold to ignore negatives. Default 0.7.
+        """
         super().__init__()
-        # register raw anchors and normalized dims
-        anchors_tensor = torch.tensor(anchors, dtype=torch.float32)
-        self.register_buffer("anchors", anchors_tensor)  # (A, 2)
-        self.register_buffer(
-            "anchor_w", anchors_tensor[:, 0] / img_dim)  # (A,)
-        self.register_buffer(
-            "anchor_h", anchors_tensor[:, 1] / img_dim)  # (A,)
+        anc = torch.tensor(anchors, dtype=torch.float32)
+        # Raw anchor sizes for reference
+        self.register_buffer("anchors", anc)         # (A, 2)
+        # Normalized anchor dims in [0,1]
+        self.register_buffer("anchor_w", anc[:, 0] / img_dim)  # (A,)
+        self.register_buffer("anchor_h", anc[:, 1] / img_dim)  # (A,)
 
         self.num_classes = num_classes
         self.img_dim = img_dim
@@ -37,7 +59,7 @@ class YOLOv2Loss(nn.Module):
         self.lambda_noobj = lambda_noobj
         self.ignore_iou_thr = ignore_iou_thr
 
-        # loss functions
+        # Loss functions with sum reduction for stable scaling
         self.mse = nn.MSELoss(reduction="sum")
         self.bce = nn.BCEWithLogitsLoss(reduction="sum")
         self.ce = nn.CrossEntropyLoss(reduction="sum")
@@ -48,11 +70,21 @@ class YOLOv2Loss(nn.Module):
         targets: List[Dict[str, torch.Tensor]],
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """
+        Compute YOLOv2 loss.
+
         Args:
-            preds: Tensor of shape (B, S, S, A*(5+C)), raw output from YOLOv2 head.
-            targets: list of dicts with 'boxes' (N x 4 normalized xyxy) and 'labels' (N).
+            preds (Tensor[B, S, S, A*(5+C)]): Raw output from prediction head.
+            targets (List[dict]): Ground-truth per image, each with:
+                - 'boxes' (Tensor[N,4]): normalized xyxy boxes.
+                - 'labels' (Tensor[N]): class indices.
+
         Returns:
-            total_loss and dict of individual loss terms & counts.
+            total_loss (Tensor): Scalar sum of all loss terms.
+            loss_dict (dict): Individual losses and anchor counts:
+                'coord', 'obj', 'noobj', 'cls', 'pos', 'neg', plus 'loss'.
+
+        Raises:
+            AssertionError: If feature map is not square or channel size mismatches.
         """
         device = preds.device
         B, S, S2, D = preds.shape
@@ -61,16 +93,22 @@ class YOLOv2Loss(nn.Module):
         expected_D = A * (5 + self.num_classes)
         assert D == expected_D, f"Pred channels ({D}) != A*(5+C) ({expected_D})"
 
-        # reshape predictions to (B, S, S, A, 5+C)
+        # ------------------------------------------------------------------
+        # 1. Reshape predictions to separate anchors
+        # ------------------------------------------------------------------
         preds = preds.view(B, S, S, A, 5 + self.num_classes)
-        tx = preds[..., 0]
-        ty = preds[..., 1]
-        tw = preds[..., 2]
-        th = preds[..., 3]
-        tconf = preds[..., 4]
-        tcls = preds[..., 5:]  # class logits
+        tx, ty, tw, th, to = (
+            preds[..., 0],
+            preds[..., 1],
+            preds[..., 2],
+            preds[..., 3],
+            preds[..., 4],
+        )
+        tcls = preds[..., 5:]  # (B, S, S, A, C)
 
-        # build targets
+        # ------------------------------------------------------------------
+        # 2. Build training targets and masks
+        # ------------------------------------------------------------------
         tgt_xywh, tgt_conf, tgt_cls_idx, obj_mask, noobj_mask = build_targets_yolov2(
             targets=targets,
             anchors=self.anchors,
@@ -80,18 +118,18 @@ class YOLOv2Loss(nn.Module):
             ignore_iou_thr=self.ignore_iou_thr,
             device=device,
         )
-
-        # number of positive/negative anchors
+        # Ensure at least one positive/negative to avoid divide-by-zero
         n_pos = obj_mask.sum().clamp(min=1).float()
         n_neg = noobj_mask.sum().clamp(min=1).float()
 
-        # ---------------- coordinate loss ----------------
-        # gather only positive predictions
-        pos_xywh = tgt_xywh[obj_mask]            # (N_pos, 4)
-        px = torch.sigmoid(tx[obj_mask])
-        py = torch.sigmoid(ty[obj_mask])
-        pw = tw[obj_mask]
-        ph = th[obj_mask]
+        # ------------------------------------------------------------------
+        # 3. Coordinate loss (only positive anchors)
+        # ------------------------------------------------------------------
+        pos_xywh = tgt_xywh[obj_mask]      # (N_pos, 4)
+        px = torch.sigmoid(tx[obj_mask])   # predict cx
+        py = torch.sigmoid(ty[obj_mask])   # predict cy
+        pw = tw[obj_mask]                  # predict sqrt(w)
+        ph = th[obj_mask]                  # predict sqrt(h)
 
         loss_x = self.mse(px, pos_xywh[:, 0])
         loss_y = self.mse(py, pos_xywh[:, 1])
@@ -100,22 +138,24 @@ class YOLOv2Loss(nn.Module):
         loss_coord = self.lambda_coord * \
             (loss_x + loss_y + loss_w + loss_h) / n_pos
 
-        # ---------------- objectness loss ----------------
-        # positive objectness
-        loss_obj = self.bce(tconf[obj_mask],   tgt_conf[obj_mask]) / n_pos
-        # negative objectness (no-object)
+        # ------------------------------------------------------------------
+        # 4. Objectness loss
+        # ------------------------------------------------------------------
+        loss_obj = self.bce(to[obj_mask],   tgt_conf[obj_mask]) / n_pos
         loss_noobj = self.bce(
-            tconf[noobj_mask], tgt_conf[noobj_mask]) * self.lambda_noobj / n_neg
+            to[noobj_mask], tgt_conf[noobj_mask]) * self.lambda_noobj / n_neg
 
-        # ---------------- classification loss ----------------
-        # (N_pos, C)
+        # ------------------------------------------------------------------
+        # 5. Classification loss (only positive anchors)
+        # ------------------------------------------------------------------
         cls_logits_pos = tcls[obj_mask].view(-1, self.num_classes)
-        cls_targets = tgt_cls_idx[obj_mask].view(-1)             # (N_pos,)
+        cls_targets = tgt_cls_idx[obj_mask].view(-1)
         loss_cls = self.ce(cls_logits_pos, cls_targets) / n_pos
 
-        # ---------------- total loss ----------------
+        # ------------------------------------------------------------------
+        # 6. Total loss and reporting
+        # ------------------------------------------------------------------
         total_loss = loss_coord + loss_obj + loss_noobj + loss_cls
-
         loss_dict = {
             "loss":   total_loss.detach(),
             "coord":  loss_coord.detach(),

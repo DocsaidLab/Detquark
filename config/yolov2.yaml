@@ -1,5 +1,5 @@
 common:
-  batch_size: 32
+  batch_size: 128
   is_restore: False
   restore_ind: ""
   restore_ckpt: ""
@@ -27,20 +27,26 @@ model:
       pretrained: True
       features_only: True
   head:
-    name: YOLOv1Head
+    name: YOLOv2Head
     options:
       in_channels: 512
       num_classes: 80
-      num_bboxes: 2
-      grid_size: 13
+      anchors: &coco_anchors
+        - [18, 22]
+        - [60, 66]
+        - [107, 175]
+        - [252, 113]
+        - [313, 293]
+      stride: 32
   loss:
-    name: YOLOv1Loss
+    name: YOLOv2Loss
     options:
-      grid_size: 13
-      num_boxes: 2
+      img_dim: 416
+      anchors: *coco_anchors
       num_classes: 80
       lambda_coord: 5.0
       lambda_noobj: 0.5
+      ignore_iou_thr: 0.7
 
 dataset:
   train_options:
@@ -65,6 +71,7 @@ dataloader:
     batch_size: -1
     num_workers: 24
     persistent_workers: True
+  valid_options:
   valid_options:
     batch_size: -1
     num_workers: 24
