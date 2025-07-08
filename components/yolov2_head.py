@@ -52,7 +52,7 @@ class YOLOv2Head(nn.Module):
         self.conv_pred = nn.Sequential(
             nn.Conv2d(in_channels, 1024, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(1024),
-            nn.LeakyReLU(0.1, inplace=True),
+            nn.LeakyReLU(0.1, inplace=False),
             nn.Conv2d(
                 1024,
                 self.num_anchors * (5 + self.num_classes),

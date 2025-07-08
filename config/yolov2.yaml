@@ -7,7 +7,7 @@ common:
   restore_all_states: False
 
 global_settings:
-  image_size: [416, 416]
+  image_size: [640, 640]
 
 trainer:
   max_epochs: 200
@@ -57,6 +57,8 @@ dataset:
       aug_ratio: 0.5
       return_tensor: True
       length_of_dataset: -1
+      cache_images: False
+      cache_ratio: 0
   valid_options:
     name: CoCoDataset
     options:
@@ -71,7 +73,6 @@ dataloader:
     batch_size: -1
     num_workers: 24
     persistent_workers: True
-  valid_options:
   valid_options:
     batch_size: -1
     num_workers: 24
