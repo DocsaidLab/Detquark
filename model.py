@@ -325,7 +325,8 @@ class ObjectDetectionModel(BaseMixin, L.LightningModule):
                 img_pred = draw_detection(
                     img_pred,
                     box.cpu().numpy(),
-                    f"{int(lbl)}:{score:.2f}",
+                    f"id:{int(lbl)}",
+                    np.round(score.cpu().numpy(), 2),
                     thickness=2,
                 )
 
@@ -392,16 +393,13 @@ class ObjectDetectionModel(BaseMixin, L.LightningModule):
             labels_fix = det["labels"][keep_idx]
 
             for box, score, lbl in zip(boxes_fix, scores_fix, labels_fix):
-
-                try:
-                    img_pred = draw_detection(
-                        img_pred,
-                        box.cpu().numpy(),
-                        f"{int(lbl)}:{score:.2f}",
-                        thickness=2,
-                    )
-                except:
-                    breakpoint()
+                img_pred = draw_detection(
+                    img_pred,
+                    box.cpu().numpy(),
+                    f"id:{int(lbl)}",
+                    np.round(score.cpu().numpy(), 2),
+                    thickness=2,
+                )
 
             out_img = np.concatenate([img_gt, img_pred], axis=1)
             imwrite(out_img, preview_dir / f"sample_{i:03d}.jpg")

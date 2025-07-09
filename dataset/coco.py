@@ -11,6 +11,8 @@ import torch
 # Determine current directory of this script
 DIR = cb.get_curdir(__file__)
 
+DEBUG = False
+
 
 class DetectionImageAug:
     """
@@ -257,6 +259,10 @@ class CoCoDataset:
                 'bboxes': bboxes,
                 'labels': classes,
             })
+
+            if DEBUG:
+                if len(dataset) > 1000:
+                    break
 
         return dataset
 

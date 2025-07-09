@@ -23,7 +23,7 @@ model:
   backbone:
     name: Backbone
     options:
-      name: timm_lcnet_100
+      name: timm_darknet53
       pretrained: True
       features_only: True
   head:

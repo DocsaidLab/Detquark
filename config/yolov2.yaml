@@ -7,7 +7,7 @@ common:
   restore_all_states: False
 
 global_settings:
-  image_size: [640, 640]
+  image_size: [416, 416]
 
 trainer:
   max_epochs: 200
@@ -23,13 +23,13 @@ model:
   backbone:
     name: Backbone
     options:
-      name: timm_lcnet_100
+      name: timm_darknet53
       pretrained: True
       features_only: True
   head:
     name: YOLOv2Head
     options:
-      in_channels: 512
+      in_channels: 1024
       num_classes: 80
       anchors: &coco_anchors
         - [18, 22]
