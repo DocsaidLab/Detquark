@@ -10,7 +10,7 @@ global_settings:
   image_size: [416, 416]
 
 trainer:
-  max_epochs: 200
+  max_epochs: 20
   precision: bf16-mixed
   val_check_interval: 1.0
   gradient_clip_val: 5
