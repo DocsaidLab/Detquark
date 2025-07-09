@@ -86,7 +86,7 @@ class YOLOv1Head(nn.Module):
         batch_size, _, Hf, Wf = x.shape
         # Ensure feature map matches expected grid size
         assert Hf == self.S and Wf == self.S, (
-            f"Expected feature map {self.S}×{self.S}, got {Hf}×{Wf}"
+            f"Expected feature map {self.S} x {self.S}, got {Hf} x {Wf}"
         )
 
         x = self.conv(x)
@@ -122,8 +122,8 @@ class YOLOv1Head(nn.Module):
         # ------------------------------------------------------------------
         # 1. Split predictions into box parameters and class logits
         # ------------------------------------------------------------------
-        pred_boxes = preds[..., : self.B *
-                           5].view(batch_size, self.S, self.S, self.B, 5)
+        pred_boxes = preds[..., :self.B * 5]
+        pred_boxes = pred_boxes.view(batch_size, self.S, self.S, self.B, 5)
         pred_cls_logits = preds[..., self.B * 5:]
 
         # ------------------------------------------------------------------

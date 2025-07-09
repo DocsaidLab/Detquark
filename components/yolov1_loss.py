@@ -90,7 +90,7 @@ class YOLOv1Loss(nn.Module):
         # Validate grid and prediction dimensions
         if (S1, S2) != (self.S, self.S):
             raise ValueError(
-                f"Grid size mismatch: expected {self.S}×{self.S}, got {S1}×{S2}")
+                f"Grid size mismatch: expected {self.S} x {self.S}, got {S1} x {S2}")
         expected_D = self.B * 5 + self.C
         if D != expected_D:
             raise ValueError(

@@ -189,8 +189,8 @@ class YOLOv2Head(nn.Module):
         # ------------------------------------------------------------------
         # 3. Flatten for NMS
         # ------------------------------------------------------------------
-        boxes = boxes.view(B, -1, 4)                     # (B, N, 4)
-        scores = (obj.view(B, -1) *                        # objectness × class score
+        boxes = boxes.view(B, -1, 4)         # (B, N, 4)
+        scores = (obj.view(B, -1) *          # objectness x class score
                   cls_prob.view(B, -1, C).max(dim=-1).values)
 
         cls_labels = cls_prob.view(B, -1, C).argmax(dim=-1)
