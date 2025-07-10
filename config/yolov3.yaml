@@ -7,7 +7,7 @@ common:
   restore_all_states: False
 
 global_settings:
-  image_size: [640, 640]
+  image_size: [416, 416]
 
 trainer:
   max_epochs: 20
@@ -23,7 +23,7 @@ model:
   backbone:
     name: Backbone
     options:
-      name: timm_lcnet_100
+      name: timm_darknet53
       pretrained: True
       features_only: True
   neck:
@@ -35,22 +35,32 @@ model:
   head:
     name: YOLOv3Head
     options:
-      in_channels: [512, 512, 512]
+      in_channels_list: [512, 512, 512]
       num_classes: 80
       anchors: &coco_anchors
-        - [[18,22],   [60,66]]      # 小尺度，stride 8
-        - [[107,175], [252,113]]    # 中尺度，stride 16
-        - [[313,293]]               # 大尺度，stride 32
-      strides: [8, 16, 32]
+        - [18, 22]    # idx 0
+        - [60, 66]    # idx 1
+        - [107, 175]  # idx 2
+        - [252, 113]  # idx 3
+        - [313, 293]  # idx 4
+      anchor_masks: &coco_anchor_masks
+        - [0, 1]      # stride 8   (小物體)
+        - [2, 3]      # stride 16  (中物體)
+        - [4]         # stride 32  (大物體)
+      strides: &coco_strides [8, 16, 32]
   loss:
     name: YOLOv3Loss
     options:
-      img_dim: 640
+      img_dim: 416
       anchors: *coco_anchors
+      anchor_masks: *coco_anchor_masks
+      strides: *coco_strides
       num_classes: 80
       lambda_coord: 5.0
       lambda_noobj: 0.5
       ignore_iou_thr: 0.7
+      noobj_iou_thr: 0.1
+      loss_normalize: batch
 
 dataset:
   train_options:
