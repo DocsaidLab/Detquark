@@ -44,9 +44,9 @@ class YOLOv2Head(nn.Module):
 
         anc = torch.as_tensor(anchors, dtype=torch.float32)
         # Raw pixel anchors for debugging or exporting
-        self.register_buffer("anchors", anc, persistent=False)
+        self.register_buffer("anchors", anc)
         # Anchor sizes in cell units for decoding
-        self.register_buffer("anchor_cells", anc / stride, persistent=False)
+        self.register_buffer("anchor_cells", anc / stride)
 
         # Convolutional predictor: conv3x3 → BN → LeakyReLU → conv1x1 to outputs
         self.conv_pred = nn.Sequential(

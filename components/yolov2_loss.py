@@ -202,7 +202,13 @@ class YOLOv2Loss(nn.Module):
         ignore_iou_thr: float,
         noobj_iou_thr: float,
         device: torch.device,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor
+    ]:
         """
         Generate training targets and masks for YOLOv2.
 

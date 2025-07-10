@@ -132,8 +132,10 @@ class ObjectDetectionModel(BaseMixin, L.LightningModule):
                     cfg.common.num_feature_levels
             else:
                 in_ch = getattr(self.backbone, "channels", [])
-            head_opts = {**head_cfg.get("options", {}),
-                         "in_channels_list": in_ch}
+            # head_opts = {**head_cfg.get("options", {}),
+            #              "in_channels_list": in_ch}
+
+            head_opts = {**head_cfg.get("options", {}), }
             self.head = globals()[head_cfg["name"]](**head_opts)
 
         # Loss function
@@ -255,8 +257,8 @@ class ObjectDetectionModel(BaseMixin, L.LightningModule):
         }
 
         # Print table to console
-        print("\n" + tabulate([summary], headers="keys",
-              floatfmt=".2f", tablefmt="psql") + "\n")
+        print("\n\n" + tabulate([summary], headers="keys",
+              floatfmt=".2f", tablefmt="psql") + "\n\n")
 
         # Log to Lightning (values in [0,1])
         self.log_dict(
@@ -326,7 +328,7 @@ class ObjectDetectionModel(BaseMixin, L.LightningModule):
                     img_pred,
                     box.cpu().numpy(),
                     f"id:{int(lbl)}",
-                    np.round(score.cpu().numpy(), 2),
+                    np.round(score.float().cpu().numpy(), 2),
                     thickness=2,
                 )
 
@@ -397,7 +399,7 @@ class ObjectDetectionModel(BaseMixin, L.LightningModule):
                     img_pred,
                     box.cpu().numpy(),
                     f"id:{int(lbl)}",
-                    np.round(score.cpu().numpy(), 2),
+                    np.round(score.float().cpu().numpy(), 2),
                     thickness=2,
                 )
 
