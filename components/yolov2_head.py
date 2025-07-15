@@ -23,6 +23,7 @@ class YOLOv2Head(nn.Module):
         num_classes: int,
         anchors: List[Tuple[float, float]],
         stride: int,
+        hid_channels: int = 1024,
         **kwargs,
     ):
         """Initializes the YOLOv2 detection head.
@@ -43,11 +44,17 @@ class YOLOv2Head(nn.Module):
 
         # Convolutional predictor producing raw detection output tensor
         self.conv_pred = nn.Sequential(
-            nn.Conv2d(in_channels, 1024, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(1024),
+            nn.Conv2d(
+                in_channels,
+                hid_channels,
+                kernel_size=3,
+                padding=1,
+                bias=False
+            ),
+            nn.BatchNorm2d(hid_channels),
             nn.LeakyReLU(0.1, inplace=False),
             nn.Conv2d(
-                1024,
+                hid_channels,
                 self.num_anchors * (5 + self.num_classes),
                 kernel_size=1,
             ),
@@ -176,7 +183,7 @@ class YOLOv2Head(nn.Module):
         # ------------------------------------------------------------------
         # 3. Flatten tensors for batch-wise NMS
         # ------------------------------------------------------------------
-        boxes = boxes.view(B, -1, 4)       # (B, N, 4)
+        boxes = boxes.view(B, -1, 4)        # (B, N, 4)
         cls_prob = cls_prob.view(B, -1, C)  # (B, N, C)
         obj = obj.view(B, -1, 1)            # (B, N, 1)
         scores = obj * cls_prob             # (B, N, C)

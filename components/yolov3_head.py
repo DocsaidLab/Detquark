@@ -1,254 +1,198 @@
 from collections import OrderedDict
-from typing import Callable, Dict, List, Sequence, Tuple
+from typing import Dict, List, Tuple
 
 import torch
 import torch.nn as nn
 import torchvision.ops as tv_ops
 
 
-# ------------------------------------------------------------------ #
-# NMS Helper (replaceable)
-# ------------------------------------------------------------------ #
-def default_nms(
-    boxes: torch.Tensor,
-    scores: torch.Tensor,
-    labels: torch.Tensor,
-    iou_thres: float,
-    max_det: int,
-) -> torch.Tensor:
-    """Perform class-aware batched NMS, keeping top `max_det` indices.
-
-    Args:
-        boxes (torch.Tensor): Boxes tensor of shape ``[N, 4]`` in (x1, y1, x2, y2) format.
-        scores (torch.Tensor): Scores tensor of shape ``[N]``.
-        labels (torch.Tensor): Integer class labels tensor of shape ``[N]``.
-        iou_thres (float): IoU threshold for NMS.
-        max_det (int): Maximum number of detections to keep.
-
-    Returns:
-        torch.Tensor: Indices of kept boxes, with length ≤ ``max_det``.
-    """
-    keep = tv_ops.batched_nms(boxes, scores, labels, iou_thres)
-    return keep[:max_det]
-
-
-# ------------------------------------------------------------------ #
-# YOLOv3 Detection Head
-# ------------------------------------------------------------------ #
 class YOLOv3Head(nn.Module):
-    """Multi-scale YOLOv3 detection head with independent 1 x 1 conv predictors per scale.
-
-    The output tensor shape per scale is ``(B, Sy, Sx, A*(5 + C))``, where
-    ``A = len(anchor_masks[i])`` is the number of anchors at that scale.
+    """YOLOv3 detection head with multi-scale anchor-based predictions.
 
     Attributes:
         num_classes (int): Number of object classes.
-        num_scales (int): Number of feature scales.
-        strides (List[int]): Down-sampling factors per scale.
-        _nms (Callable): NMS function used during decoding.
-        anchors (Tensor): Global anchors in pixels, shape ``[A, 2]``.
-        conv_preds (ModuleList): 1 x 1 conv predictors per scale.
-        _grid_cache_max (int): Maximum size of grid offset cache.
-        _grid_cache (OrderedDict): LRU cache for grid offsets keyed by
-            ``(Sy, Sx, device, dtype)``.
+        n_scales (int): Number of prediction scales.
+        strides (List[int]): Downsampling strides for each scale.
+        anchors (Tensor): Global anchor sizes in pixels, shape (A, 2).
+        pred_layers (nn.ModuleList): Per-scale prediction convolutional layers.
+        anchor_cells_s{i} (Tensor): Anchor sizes normalized by stride per scale.
+        _grid_cache (OrderedDict): Cache for grid offsets keyed by (scale_id, Sy, Sx, device, dtype).
     """
 
     def __init__(
         self,
-        in_channels_list: Sequence[int],
+        in_channels_list: List[int],
         num_classes: int,
         anchors: List[Tuple[float, float]],
         anchor_masks: List[List[int]],
         strides: List[int],
-        *,
-        nms_fn: Callable[
-            [torch.Tensor, torch.Tensor, torch.Tensor, float, int], torch.Tensor
-        ] = default_nms,
-        grid_cache_size: int = 8,
+        hid_channels: int = 1024,
     ) -> None:
-        """Initialize YOLOv3Head.
+        """Initializes YOLOv3 multi-scale detection head.
 
         Args:
-            in_channels_list (Sequence[int]): Channels of input feature maps per scale.
-            num_classes (int): Number of object classes.
-            anchors (List[Tuple[float, float]]): Global anchor list in pixels.
-            anchor_masks (List[List[int]]): Anchor indices used per scale.
-            strides (List[int]): Down-sampling factors per scale.
-            nms_fn (Callable): NMS function with signature
-                ``(boxes, scores, labels, iou_thr, max_det)``.
-            grid_cache_size (int): Maximum LRU cache size for grid offsets.
+            in_channels_list: List of input channel counts per scale.
+            num_classes: Number of object classes.
+            anchors: List of global anchor sizes in pixels [(w, h), ...].
+            anchor_masks: List of anchor index subsets per scale.
+            strides: List of downsampling strides per scale.
+            hid_channels: Hidden channels for prediction conv layers.
         """
         super().__init__()
 
         if not (len(in_channels_list) == len(anchor_masks) == len(strides)):
             raise ValueError(
-                "`in_channels_list`, `anchor_masks`, and `strides` must have equal lengths"
+                "`in_channels_list`, `anchor_masks`, and `strides` must have equal length"
             )
 
-        self.num_classes = int(num_classes)
-        self.num_scales = len(strides)
+        self.num_classes = num_classes
+        self.n_scales = len(strides)
         self.strides = list(strides)
-        self._nms = nms_fn
 
-        # Register global anchors as a buffer (shape: [A, 2])
         anc = torch.as_tensor(anchors, dtype=torch.float32)
-        self.register_buffer("anchors", anc)
+        self.register_buffer("anchors", anc)  # (A, 2)
 
-        # Build per-scale 1x1 conv predictors and register anchor buffers
-        self.conv_preds = nn.ModuleList()
-        for s, (in_ch, mask, stride) in enumerate(zip(in_channels_list, anchor_masks, strides)):
+        self.pred_layers = nn.ModuleList()
+        for i, (c_in, mask, stride) in enumerate(zip(in_channels_list, anchor_masks, strides)):
+
             mask = list(mask)
-            if any(a >= len(anc) for a in mask):
-                raise ValueError(
-                    f"anchor_masks[{s}] contains out-of-range anchor indices")
-            A = len(mask)
+            num_anchors = len(mask)
+            self.register_buffer(
+                f"anchor_cells_s{i}", self.anchors[mask] / stride
+            )  # Normalize anchors by stride
 
-            # Conv layer outputs A * (5 + num_classes) channels for bounding box predictions
-            conv = nn.Conv2d(in_ch, A * (5 + num_classes), kernel_size=1)
-            self.conv_preds.append(conv)
+            self.pred_layers.append(
+                nn.Sequential(
+                    nn.Conv2d(c_in, hid_channels, kernel_size=3,
+                              padding=1, bias=False),
+                    nn.BatchNorm2d(hid_channels),
+                    nn.LeakyReLU(0.1, inplace=False),
+                    nn.Conv2d(hid_channels, num_anchors *
+                              (5 + num_classes), kernel_size=1),
+                )
+            )
 
-            # Anchors per scale in pixel units and normalized cell units
-            px = anc[mask]                      # shape: (A, 2), pixels
-            # normalized to feature cell size
-            cell = px / float(stride)
-            self.register_buffer(f"anchors_px_s{s}", px)
-            self.register_buffer(f"anchors_cell_s{s}", cell)
-
-        # Initialize LRU cache for grid offsets
-        self._grid_cache_max = int(grid_cache_size)
+        # Cache grid offsets for decoding, keyed by (scale_id, Sy, Sx, device, dtype)
         self._grid_cache: OrderedDict[
-            Tuple[int, int, torch.device, torch.dtype],
+            Tuple[int, int, int, torch.device, torch.dtype],
             Tuple[torch.Tensor, torch.Tensor],
         ] = OrderedDict()
 
     def forward(self, features: List[torch.Tensor]) -> List[torch.Tensor]:
-        """Compute raw predictions for each input feature map scale.
+        """Forward pass producing raw predictions for each scale.
 
         Args:
-            features (List[torch.Tensor]): List of feature maps, each with
-                shape ``(B, C, Sy, Sx)``.
+            features: List of feature maps, one per scale.
 
         Returns:
-            List[torch.Tensor]: Raw prediction tensors per scale with shape
-                ``(B, Sy, Sx, A*(5 + C))``.
+            List of raw prediction tensors shaped (B, Sy, Sx, A*(5+C)) per scale.
         """
-        if len(features) != self.num_scales:
+        if len(features) != self.n_scales:
             raise ValueError(
-                f"Expected {self.num_scales} feature maps, but got {len(features)}")
+                f"Expected {self.n_scales} feature maps, got {len(features)}"
+            )
 
-        outputs: List[torch.Tensor] = []
-        for feat, conv in zip(features, self.conv_preds):
-            p = conv(feat)                     # shape: (B, A*(5+C), Sy, Sx)
-            p = p.permute(0, 2, 3, 1).contiguous()  # to (B, Sy, Sx, A*(5+C))
+        outputs = []
+        for feat, pred_layer in zip(features, self.pred_layers):
+            p = pred_layer(feat)
+            p = p.permute(0, 2, 3, 1).contiguous()
             outputs.append(p)
+
         return outputs
 
     def _get_grid(
         self,
+        scale_id: int,
         Sy: int,
         Sx: int,
         device: torch.device,
         dtype: torch.dtype,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Retrieve or create LRU-cached grid offset tensors for feature map spatial coords.
+        """Get or create grid offsets for box decoding at given scale and resolution.
 
         Args:
-            Sy (int): Height of the feature map.
-            Sx (int): Width of the feature map.
-            device (torch.device): Target device.
-            dtype (torch.dtype): Target tensor data type.
+            scale_id: Index of prediction scale.
+            Sy: Grid height.
+            Sx: Grid width.
+            device: Tensor device.
+            dtype: Tensor dtype.
 
         Returns:
-            Tuple[torch.Tensor, torch.Tensor]: grid_x and grid_y tensors
-                with shape ``(1, Sy, Sx, 1)``.
+            Tuple of grid_x and grid_y tensors shaped (1, Sy, Sx, 1).
         """
-        key = (Sy, Sx, device, dtype)
-        if key in self._grid_cache:
-            self._grid_cache.move_to_end(key)
-            return self._grid_cache[key]
-
-        yv, xv = torch.meshgrid(
-            torch.arange(Sy, device=device, dtype=dtype),
-            torch.arange(Sx, device=device, dtype=dtype),
-            indexing="ij",
-        )
-        grid_y = yv.unsqueeze(0).unsqueeze(-1)
-        grid_x = xv.unsqueeze(0).unsqueeze(-1)
-
-        # Enforce LRU cache size limit
-        if len(self._grid_cache) >= self._grid_cache_max:
-            self._grid_cache.popitem(last=False)
-        self._grid_cache[key] = (grid_x, grid_y)
-        return grid_x, grid_y
+        key = (scale_id, Sy, Sx, device, dtype)
+        if key not in self._grid_cache:
+            yv, xv = torch.meshgrid(
+                torch.arange(Sy, device=device, dtype=dtype),
+                torch.arange(Sx, device=device, dtype=dtype),
+                indexing="ij",
+            )
+            grid_y = yv.unsqueeze(0).unsqueeze(-1)  # (1, Sy, Sx, 1)
+            grid_x = xv.unsqueeze(0).unsqueeze(-1)  # (1, Sy, Sx, 1)
+            self._grid_cache[key] = (grid_x, grid_y)
+        return self._grid_cache[key]
 
     @torch.no_grad()
     def decode(
         self,
         preds: List[torch.Tensor],
         img_size: Tuple[int, int],
-        *,
         conf_thres: float = 0.25,
         iou_thres: float = 0.45,
         max_det: int = 300,
-        pre_nms_topk: int | None = 1000,
     ) -> List[Dict[str, torch.Tensor]]:
-        """Decode raw model outputs into NMS-filtered final detections.
+        """Decode raw multi-scale predictions into final detections.
 
         Args:
-            preds (List[torch.Tensor]): Raw prediction tensors per scale.
-            img_size (Tuple[int, int]): Original image size (height, width).
-            conf_thres (float): Confidence score threshold to filter candidates.
-            iou_thres (float): IoU threshold used in NMS.
-            max_det (int): Maximum number of detections per image post-NMS.
-            pre_nms_topk (int | None): Optional pre-NMS top-K filtering threshold.
+            preds: List of raw prediction tensors per scale.
+            img_size: Original image size (height, width) in pixels.
+            conf_thres: Confidence threshold for filtering detections.
+            iou_thres: IoU threshold for non-maximum suppression.
+            max_det: Maximum detections to keep per image.
 
         Returns:
-            List[Dict[str, torch.Tensor]]: List (length B) of dicts per batch item with keys:
-                - "boxes": Tensor[N, 4] bounding boxes (x1, y1, x2, y2).
-                - "scores": Tensor[N] confidence scores.
-                - "labels": Tensor[N] class labels.
+            List of dictionaries (one per batch item) with keys:
+                'boxes' (Tensor[N, 4]),
+                'scores' (Tensor[N]),
+                'labels' (Tensor[N]).
         """
-        if len(preds) != self.num_scales:
+        if len(preds) != self.n_scales:
             raise ValueError("Mismatch in number of prediction scales")
 
+        B, *_ = preds[0].shape
         H, W = img_size
         device, dtype = preds[0].device, preds[0].dtype
-        B = preds[0].shape[0]
         C = self.num_classes
 
         all_boxes, all_scores, all_labels = [], [], []
+        for s, (pred, stride) in enumerate(zip(preds, self.strides)):
+            B_s, Sy, Sx, _ = pred.shape
+            a_i = pred.shape[-1] // (5 + C)
 
-        for s, p in enumerate(preds):
-            B_s, Sy, Sx, _ = p.shape
-            if B_s != B:
-                raise ValueError(f"Batch size mismatch at scale {s}")
+            pred = pred.view(B_s, Sy, Sx, a_i, 5 + C)
+            tx, ty, tw, th, to = (
+                pred[..., 0],
+                pred[..., 1],
+                pred[..., 2],
+                pred[..., 3],
+                pred[..., 4],
+            )
+            cls_logits = pred[..., 5:]
 
-            A = p.shape[-1] // (5 + C)
-            p = p.view(B, Sy, Sx, A, 5 + C)
-
-            # Split predictions into components
-            tx, ty, tw, th, to = p[..., 0], p[...,
-                                              1], p[..., 2], p[..., 3], p[..., 4]
-            cls_logits = p[..., 5:]
-
-            # Apply activation functions
-            bx = torch.sigmoid(tx)
-            by = torch.sigmoid(ty)
+            cx = torch.sigmoid(tx)
+            cy = torch.sigmoid(ty)
             bw = torch.exp(tw.clamp(max=8.0))
             bh = torch.exp(th.clamp(max=8.0))
             obj = torch.sigmoid(to)
-            cls_prob = torch.sigmoid(cls_logits)  # multi-label sigmoid
+            cls_prob = torch.softmax(cls_logits, dim=-1)
 
-            # Retrieve grid offsets and anchors
-            grid_x, grid_y = self._get_grid(Sy, Sx, device, dtype)
-            anc_cell = getattr(self, f"anchors_cell_s{s}").to(dtype)  # (A, 2)
-            anc_w = anc_cell[:, 0].view(1, 1, 1, A)
-            anc_h = anc_cell[:, 1].view(1, 1, 1, A)
-            stride = float(self.strides[s])
+            grid_x, grid_y = self._get_grid(s, Sy, Sx, device, dtype)
+            anc_cell = getattr(self, f"anchor_cells_s{s}")
+            anc_w = anc_cell[:, 0].view(1, 1, 1, a_i)
+            anc_h = anc_cell[:, 1].view(1, 1, 1, a_i)
 
-            # Decode bounding boxes to image coordinates
-            cx = (bx + grid_x) * stride
-            cy = (by + grid_y) * stride
+            cx = (cx + grid_x) * stride
+            cy = (cy + grid_y) * stride
             pw = anc_w * bw * stride
             ph = anc_h * bh * stride
 
@@ -256,51 +200,48 @@ class YOLOv3Head(nn.Module):
             y1 = (cy - ph * 0.5).clamp(0, H - 1)
             x2 = (cx + pw * 0.5).clamp(0, W - 1)
             y2 = (cy + ph * 0.5).clamp(0, H - 1)
+            boxes = torch.stack((x1, y1, x2, y2), dim=-1)
 
-            boxes = torch.stack((x1, y1, x2, y2), dim=-1).reshape(B, -1, 4)
-
-            # Compute final scores (objectness  x  class probabilities)
-            scores_all = (obj.unsqueeze(-1) * cls_prob).reshape(B, -1, C)
-
-            # Get best class and corresponding score per box (Darknet style)
-            best_scores, best_labels = scores_all.max(dim=-1)
-
-            # Optional pre-NMS top-K filtering
-            if pre_nms_topk is not None and best_scores.shape[1] > pre_nms_topk:
-                vals, idxs = torch.topk(best_scores, pre_nms_topk, dim=1)
-                gather_idx_boxes = idxs.unsqueeze(-1).expand(-1, -1, 4)
-                boxes = torch.gather(boxes, 1, gather_idx_boxes)
-                best_scores = vals
-                best_labels = torch.gather(best_labels, 1, idxs)
+            boxes = boxes.view(B, -1, 4)
+            cls_prob = cls_prob.view(B, -1, C)
+            obj = obj.view(B, -1, 1)
+            scores = obj * cls_prob
+            scores_max, labels = scores.max(dim=-1)
 
             all_boxes.append(boxes)
-            all_scores.append(best_scores)
-            all_labels.append(best_labels)
+            all_scores.append(scores_max)
+            all_labels.append(labels)
 
-        boxes_cat = torch.cat(all_boxes, dim=1)      # (B, N, 4)
-        scores_cat = torch.cat(all_scores, dim=1)    # (B, N)
-        labels_cat = torch.cat(all_labels, dim=1)    # (B, N)
+        boxes_cat = torch.cat(all_boxes, dim=1)
+        scores_cat = torch.cat(all_scores, dim=1)
+        labels_cat = torch.cat(all_labels, dim=1)
 
-        results: List[Dict[str, torch.Tensor]] = []
+        results = []
         for b in range(B):
             mask = scores_cat[b] > conf_thres
             if not mask.any():
-                results.append({
-                    "boxes":  torch.empty((0, 4), device=device),
-                    "scores": torch.empty((0,), device=device),
-                    "labels": torch.empty((0,), dtype=torch.long, device=device),
-                })
+                results.append(
+                    {
+                        "boxes": torch.empty((0, 4), device=device),
+                        "scores": torch.empty(0, device=device),
+                        "labels": torch.empty(0, dtype=torch.long, device=device),
+                    }
+                )
                 continue
 
-            b_boxes = boxes_cat[b][mask]
-            b_scores = scores_cat[b][mask]
-            b_labels = labels_cat[b][mask]
+            boxes_b = boxes_cat[b][mask]
+            scores_b = scores_cat[b][mask]
+            labels_b = labels_cat[b][mask]
 
-            keep = self._nms(b_boxes, b_scores, b_labels, iou_thres, max_det)
+            keep = tv_ops.batched_nms(boxes_b, scores_b, labels_b, iou_thres)
+            keep = keep[:max_det]
 
-            results.append({
-                "boxes":  b_boxes[keep].float(),
-                "scores": b_scores[keep],
-                "labels": b_labels[keep],
-            })
+            results.append(
+                {
+                    "boxes": boxes_b[keep],
+                    "scores": scores_b[keep],
+                    "labels": labels_b[keep],
+                }
+            )
+
         return results

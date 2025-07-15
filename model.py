@@ -257,7 +257,7 @@ class ObjectDetectionModel(BaseMixin, L.LightningModule):
         }
 
         # Print table to console
-        print("\n\n" + tabulate([summary], headers="keys",
+        print("\n\n\n" + tabulate([summary], headers="keys",
               floatfmt=".2f", tablefmt="psql") + "\n\n")
 
         # Log to Lightning (values in [0,1])

@@ -3,7 +3,7 @@ from typing import Dict, List, Literal, Tuple
 import torch
 import torch.nn as nn
 
-from .utils import bbox_iou
+from .utils import build_targets
 
 
 class YOLOv2Loss(nn.Module):
@@ -115,15 +115,15 @@ class YOLOv2Loss(nn.Module):
             tgt_cls_idx,
             obj_mask,
             noobj_mask,
-        ) = self.build_targets_yolov2(
-            targets,
-            self.anchors,
-            S,
-            self.img_dim,
-            self.num_classes,
-            self.ignore_iou_thr,
-            self.noobj_iou_thr,
-            device,
+        ) = build_targets(
+            targets=targets,
+            anchors=self.anchors,
+            grid_size=S,
+            img_dim=self.img_dim,
+            num_classes=self.num_classes,
+            ignore_iou_thr=self.ignore_iou_thr,
+            noobj_iou_thr=self.noobj_iou_thr,
+            device=device,
         )
 
         n_pos = obj_mask.sum().float().clamp(min=1.0)
@@ -182,112 +182,3 @@ class YOLOv2Loss(nn.Module):
             "neg": n_neg.detach(),
         }
         return total_loss, loss_dict
-
-    @torch.no_grad()
-    def build_targets_yolov2(
-        self,
-        targets: List[Dict[str, torch.Tensor]],
-        anchors: torch.Tensor,
-        S: int,
-        img_dim: int,
-        num_classes: int,
-        ignore_iou_thr: float,
-        noobj_iou_thr: float,
-        device: torch.device,
-    ) -> Tuple[
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-    ]:
-        """Construct target tensors and masks for training.
-
-        Args:
-            targets: List of ground truth annotations per batch item.
-            anchors: Anchor box sizes (A, 2).
-            S: Grid size.
-            img_dim: Image dimension in pixels.
-            num_classes: Number of object classes.
-            ignore_iou_thr: IoU threshold to ignore no-object loss.
-            noobj_iou_thr: IoU threshold to suppress no-object loss.
-            device: Device for target tensors.
-
-        Returns:
-            target_xywh: Tensor of shape (B, S, S, A, 4) with target box offsets.
-            target_conf: Objectness target tensor (B, S, S, A).
-            target_cls_idx: Class index targets (B, S, S, A).
-            obj_mask: Boolean mask for positive anchors.
-            noobj_mask: Boolean mask for negative anchors.
-        """
-        B = len(targets)
-        A = anchors.size(0)
-
-        anchor_w = anchors[:, 0] / img_dim
-        anchor_h = anchors[:, 1] / img_dim
-        anchor_boxes = torch.stack(
-            [-anchor_w / 2, -anchor_h / 2, anchor_w / 2, anchor_h / 2],
-            dim=1
-        ).to(device)
-
-        target_xywh = torch.zeros((B, S, S, A, 4), device=device)
-        target_conf = torch.zeros((B, S, S, A), device=device)
-        target_cls_idx = torch.zeros(
-            (B, S, S, A), dtype=torch.long, device=device)
-        obj_mask = torch.zeros((B, S, S, A), dtype=torch.bool, device=device)
-        noobj_mask = torch.ones_like(obj_mask)
-
-        for b_idx, sample in enumerate(targets):
-            boxes = sample.get(
-                "boxes", torch.empty((0, 4), device=device))
-            labels = sample.get(
-                "labels", torch.empty((0,), dtype=torch.long, device=device))
-
-            if boxes.numel() == 0:
-                continue
-
-            if labels.max() >= num_classes:
-                raise ValueError("label id >= num_classes")
-
-            x1, y1, x2, y2 = boxes.unbind(1)
-            cx = (x1 + x2) * 0.5
-            cy = (y1 + y2) * 0.5
-            w = (x2 - x1).clamp(min=1e-6)
-            h = (y2 - y1).clamp(min=1e-6)
-
-            gi = (cx * S).floor().clamp(0, S - 1).long()
-            gj = (cy * S).floor().clamp(0, S - 1).long()
-
-            for k in range(boxes.size(0)):
-                i, j = gi[k], gj[k]
-
-                gt_box = boxes.new_tensor(
-                    [-w[k] / 2, -h[k] / 2, w[k] / 2, h[k] / 2],
-                    device=device
-                ).unsqueeze(0)
-                ious = bbox_iou(anchor_boxes, gt_box).view(-1)
-                best_a = torch.argmax(ious)
-
-                if obj_mask[b_idx, j, i, best_a]:
-                    continue
-
-                obj_mask[b_idx, j, i, best_a] = True
-                noobj_mask[b_idx, j, i, best_a] = False
-
-                target_xywh[b_idx, j, i, best_a, 0] = cx[k] * S - i
-                target_xywh[b_idx, j, i, best_a, 1] = cy[k] * S - j
-                target_xywh[b_idx, j, i, best_a, 2] = torch.log(
-                    w[k] / anchor_w[best_a] + 1e-16)
-                target_xywh[b_idx, j, i, best_a, 3] = torch.log(
-                    h[k] / anchor_h[best_a] + 1e-16)
-
-                target_conf[b_idx, j, i, best_a] = 1.0
-                target_cls_idx[b_idx, j, i, best_a] = labels[k]
-
-                mask_high = ious > ignore_iou_thr
-                mask_mid = ious > noobj_iou_thr
-                suppress_mask = mask_high | mask_mid
-                if suppress_mask.any():
-                    noobj_mask[b_idx, j, i, suppress_mask] = False
-
-        return target_xywh, target_conf, target_cls_idx, obj_mask, noobj_mask

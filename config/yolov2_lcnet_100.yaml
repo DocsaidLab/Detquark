@@ -1,5 +1,5 @@
 common:
-  batch_size: 64
+  batch_size: 128
   is_restore: False
   restore_ind: ""
   restore_ckpt: ""
@@ -23,48 +23,30 @@ model:
   backbone:
     name: Backbone
     options:
-      name: timm_darknet53
+      name: timm_lcnet_100
       pretrained: True
       features_only: True
-  neck:
-    name: YOLOv3Neck
-    options:
-      name: FPN
-      out_channels: 512
-      in_indices: [2, 3, 4]
   head:
-    name: YOLOv3Head
+    name: YOLOv2Head
     options:
-      in_channels_list: [512, 512, 512]
+      in_channels: 512
       num_classes: 80
       anchors: &coco_anchors
-        - [10, 13]
-        - [16, 30]
-        - [33, 23]
-        - [30, 61]
-        - [62, 45]
-        - [59, 119]
-        - [116, 90]
-        - [156, 198]
-        - [373, 326]
-      anchor_masks: &coco_anchor_masks
-        - [0, 1, 2]
-        - [3, 4, 5]
-        - [6, 7, 8]
-      strides: &coco_strides [8, 16, 32]
+        - [18, 22]
+        - [60, 66]
+        - [107, 175]
+        - [252, 113]
+        - [313, 293]
+      stride: 32
   loss:
-    name: YOLOv3Loss
+    name: YOLOv2Loss
     options:
       img_dim: 416
       anchors: *coco_anchors
-      anchor_masks: *coco_anchor_masks
-      strides: *coco_strides
       num_classes: 80
       lambda_coord: 5.0
       lambda_noobj: 0.5
       ignore_iou_thr: 0.7
-      noobj_iou_thr: 0.1
-      loss_normalize: batch
 
 dataset:
   train_options:
@@ -75,6 +57,8 @@ dataset:
       aug_ratio: 0.5
       return_tensor: True
       length_of_dataset: -1
+      cache_images: False
+      cache_ratio: 0
   valid_options:
     name: CoCoDataset
     options:
