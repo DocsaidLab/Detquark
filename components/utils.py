@@ -1,6 +1,17 @@
+import copy
 from typing import Dict, List, Tuple
 
 import torch
+import torch.nn as nn
+
+
+def _clone_act(default_act: nn.Module, spec: bool | nn.Module) -> nn.Module:
+    """Return an activation module per spec, ensuring unique instances."""
+    if isinstance(spec, nn.Module):
+        return copy.deepcopy(spec)
+    if spec:
+        return default_act.__class__()  # type: ignore[call-arg]
+    return nn.Identity()
 
 
 def bbox_iou(
