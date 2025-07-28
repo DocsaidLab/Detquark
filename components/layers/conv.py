@@ -1,4 +1,5 @@
 import copy
+import math
 from typing import Sequence, Tuple, Union
 
 import torch
@@ -8,6 +9,7 @@ __all__ = [
     "auto_pad",
     "make_divisible",
     "ConvBNActivation",
+    "DWConv",
 ]
 
 IntOrSeq = Union[int, Sequence[int]]
@@ -150,3 +152,48 @@ class ConvBNActivation(nn.Module):
     def forward_fuse(self, x: torch.Tensor) -> torch.Tensor:
         """Apply conv → act (for fused‑BN inference)."""
         return self.act(self.conv(x))
+
+
+class DWConv(ConvBNActivation):
+    """Depth-wise or group-wise convolution block with batch normalization and activation.
+
+    This block performs depth-wise convolution when `in_channels == out_channels`,
+    setting `groups` equal to `in_channels`. Otherwise, it falls back to a grouped convolution
+    where `groups` is the greatest common divisor (GCD) of `in_channels` and `out_channels`,
+    ensuring that both are divisible by `groups`.
+
+    Args:
+        in_channels (int): Number of input channels.
+        out_channels (int): Number of output channels.
+        kernel_size (int or Sequence[int], optional): Size of the convolution kernel. Defaults to 1.
+        stride (int, optional): Stride of the convolution. Defaults to 1.
+        dilation (int, optional): Dilation rate of the convolution. Defaults to 1.
+        activation (bool or nn.Module, optional): Activation function selector.
+            If True, applies SiLU activation (default).
+            If False, applies identity (no activation).
+            If nn.Module, applies a deep-copied custom activation module.
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        *,
+        kernel_size: IntOrSeq = 1,
+        stride: int = 1,
+        dilation: int = 1,
+        activation: bool | nn.Module = True,
+    ) -> None:
+        # Use GCD for grouped conv or depth-wise if equal
+        groups: int = math.gcd(in_channels, out_channels)
+
+        super().__init__(
+            in_channels,
+            out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=None,  # padding auto-calculated in parent class
+            groups=groups,
+            dilation=dilation,
+            activation=activation,
+        )

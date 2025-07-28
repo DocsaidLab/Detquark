@@ -3,8 +3,7 @@ from typing import Union
 import torch
 import torch.nn as nn
 
-from ..layers import PositionSensitiveAttention
-from ..layers.common import ConvBNActivation
+from ..layers import ConvBNActivation, PositionSensitiveAttention
 from ..utils import _clone_act
 from .bottleneck import BottleneckBlock
 
