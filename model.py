@@ -1,4 +1,5 @@
-from typing import Any, Dict, List, Tuple, Union
+import inspect
+from typing import Any, Dict, List, Sequence, Tuple, Type, Union
 
 import lightning as L
 import numpy as np
@@ -8,8 +9,8 @@ from capybara import draw_detection, dump_json, get_curdir, imwrite
 from tabulate import tabulate
 from torchmetrics.detection.mean_ap import MeanAveragePrecision
 
-from .components import *  # noqa: F403
-from .utils import BaseMixin  # noqa: F401
+from .components import *
+from .utils import BaseMixin
 
 # Directory of this file
 DIR = get_curdir(__file__)
@@ -99,6 +100,13 @@ class ObjectDetectionModel(BaseMixin, L.LightningModule):
     - Preview and validation visualization utilities.
     """
 
+    REGISTRY: Dict[str, Type[nn.Module]] = {}
+
+    @classmethod
+    def register(cls, name: str, component: Type[nn.Module]) -> None:
+        """Adds a class to the component registry."""
+        cls.REGISTRY[name] = component
+
     def __init__(self, cfg: Dict[str, Any]):
         super().__init__()
         self.cfg = cfg
@@ -110,45 +118,62 @@ class ObjectDetectionModel(BaseMixin, L.LightningModule):
         self.neck = nn.Identity()
         self.head = nn.Identity()
 
-        # Backbone
-        bb_cfg = cfg.model.get("backbone", {})
-        if bb_cfg:
-            self.backbone = globals()[bb_cfg["name"]](
-                **bb_cfg.get("options", {}))
+        # Build components
+        self.backbone = self._build_component(cfg["model"]["backbone"])
+        self.neck = (
+            self._build_component(
+                cfg["model"]["neck"],
+                extra_kwargs={"in_channels_list": self._infer_neck_channels()},
+            )
+            if cfg.model.get("neck", {})
+            else nn.Identity()
+        )
+        self.head = self._build_component(cfg["model"]["head"])
+        self.criterion = self._build_component(cfg["model"]["loss"])
 
-        # Neck
-        neck_cfg = cfg.model.get("neck", {})
-        if neck_cfg:
-            in_ch = getattr(self.backbone, "channels", [])
-            neck_opts = {**neck_cfg.get("options", {}),
-                         "in_channels_list": in_ch}
-            self.neck = globals()[neck_cfg["name"]](**neck_opts)
-
-        # Head
-        head_cfg = cfg.model.get("head", {})
-        if head_cfg:
-            if hasattr(self.neck, "out_channels"):
-                in_ch = [self.neck.out_channels] * \
-                    cfg.common.num_feature_levels
-            else:
-                in_ch = getattr(self.backbone, "channels", [])
-            # head_opts = {**head_cfg.get("options", {}),
-            #              "in_channels_list": in_ch}
-
-            head_opts = {**head_cfg.get("options", {}), }
-            self.head = globals()[head_cfg["name"]](**head_opts)
-
-        # Loss function
-        loss_cfg = cfg.model.get("loss", {})
-        self.criterion = globals()[loss_cfg["name"]](
-            **loss_cfg.get("options", {}))
-
-        # COCO-style mAP metric
+        # Metrics
         self.map_metric = MeanAveragePrecision(
             box_format="xyxy",
             iou_type="bbox",
             class_metrics=False
         )
+
+    def _infer_neck_channels(self) -> List[int]:
+        """Finds backbone output channels to feed into the neck."""
+        # Preferred explicit attribute
+        if hasattr(self.backbone, "feature_info"):
+            return [f["num_chs"] for f in self.backbone.feature_info]
+
+        # Fallback attribute
+        if hasattr(self.backbone, "channels"):
+            return list(self.backbone.channels)
+
+        raise RuntimeError(
+            "Cannot infer neck `in_channels_list`. "
+            "Ensure backbone exposes `feature_info` or `channels`."
+        )
+
+    def _build_component(
+        self,
+        cfg_section: Dict[str, Any],
+        *,
+        extra_kwargs: Dict[str, Any] | None = None,
+    ) -> nn.Module:
+        """Instantiates a component from the registry plus any dynamic kwargs."""
+        name: str = cfg_section["name"]
+        options: Dict[str, Any] = {**cfg_section.get("options", {})}
+        if extra_kwargs:
+            options = {**options, **extra_kwargs}
+
+        if name not in self.REGISTRY:
+            # Fallback to globals for backward compatibility
+            cls = globals().get(name)
+            if inspect.isclass(cls) and issubclass(cls, nn.Module):
+                self.register(name, cls)
+            else:
+                raise ValueError(f"Component {name!r} is not registered.")
+
+        return self.REGISTRY[name](**options)
 
     def forward(self, x: torch.Tensor):
         """
@@ -195,12 +220,17 @@ class ObjectDetectionModel(BaseMixin, L.LightningModule):
         batch_idx: int
     ):
         imgs, targets = batch
-        preds_raw, *_ = self.forward(imgs)
-        B, _, H, W = imgs.shape
+
+        # Outputs
+        # preds_raw[0].shape = [B, H/8, W/8, 255]
+        # preds_raw[1].shape = [B, H/16, W/16, 255]
+        # preds_raw[2].shape = [B, H/32, W/32, 255]
+        preds, *_ = self.forward(imgs)
+        _, _, H, W = imgs.shape
 
         # Decode predictions at low threshold
         dets_list = self.head.decode(
-            preds_raw,
+            preds,
             img_size=(H, W),
             conf_thres=0.001,
             iou_thres=0.65,
