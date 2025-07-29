@@ -129,6 +129,10 @@ class ObjectDetectionModel(BaseMixin, L.LightningModule):
             else nn.Identity()
         )
         self.head = self._build_component(cfg["model"]["head"])
+        self.processor_eval = self._build_component(
+            cfg["model"]["postprocessor"]["eval"])
+        self.processor_vis = self._build_component(
+            cfg["model"]["postprocessor"]["vis"])
         self.criterion = self._build_component(cfg["model"]["loss"])
 
         # Metrics
@@ -168,6 +172,7 @@ class ObjectDetectionModel(BaseMixin, L.LightningModule):
         if name not in self.REGISTRY:
             # Fallback to globals for backward compatibility
             cls = globals().get(name)
+
             if inspect.isclass(cls) and issubclass(cls, nn.Module):
                 self.register(name, cls)
             else:
@@ -229,13 +234,7 @@ class ObjectDetectionModel(BaseMixin, L.LightningModule):
         _, _, H, W = imgs.shape
 
         # Decode predictions at low threshold
-        dets_list = self.head.decode(
-            preds,
-            img_size=(H, W),
-            conf_thres=0.001,
-            iou_thres=0.65,
-            max_det=300,
-        )
+        dets_list = self.processor_eval(preds, img_size=(H, W))
 
         pred_dicts, tgt_dicts = [], []
         for det, tgt in zip(dets_list, targets):
@@ -317,12 +316,7 @@ class ObjectDetectionModel(BaseMixin, L.LightningModule):
         preview_dir.mkdir(parents=True, exist_ok=True)
 
         B, _, H, W = imgs.shape
-        dets_list = self.head.decode(
-            preds,
-            img_size=(H, W),
-            conf_thres=0.25,
-            iou_thres=0.45
-        )
+        dets_list = self.processor_vis(preds, img_size=(H, W))
 
         for i in range(B):
             img_orig = _to_numpy_img(imgs[i])

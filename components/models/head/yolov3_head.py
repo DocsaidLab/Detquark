@@ -1,9 +1,8 @@
 from collections import OrderedDict
-from typing import Dict, List, Tuple
+from typing import List, Tuple
 
 import torch
 import torch.nn as nn
-import torchvision.ops as tv_ops
 
 
 class YOLOv3Head(nn.Module):
@@ -15,8 +14,7 @@ class YOLOv3Head(nn.Module):
         strides (List[int]): Downsampling strides for each scale.
         anchors (Tensor): Global anchor sizes in pixels, shape (A, 2).
         pred_layers (nn.ModuleList): Per-scale prediction convolutional layers.
-        anchor_cells_s{i} (Tensor): Anchor sizes normalized by stride per scale.
-        _grid_cache (OrderedDict): Cache for grid offsets keyed by (scale_id, Sy, Sx, device, dtype).
+        anchor_cells (List[Tensor]): Anchor sizes normalized by stride per scale.
     """
 
     def __init__(
@@ -53,13 +51,14 @@ class YOLOv3Head(nn.Module):
         self.register_buffer("anchors", anc)  # (A, 2)
 
         self.pred_layers = nn.ModuleList()
-        for i, (c_in, mask, stride) in enumerate(zip(in_channels_list, anchor_masks, strides)):
+        self.anchor_cells: List[torch.Tensor] = []
 
+        for i, (c_in, mask, stride) in enumerate(zip(in_channels_list, anchor_masks, strides)):
             mask = list(mask)
             num_anchors = len(mask)
-            self.register_buffer(
-                f"anchor_cells_s{i}", self.anchors[mask] / stride
-            )  # Normalize anchors by stride
+            anchor_cell = self.anchors[mask] / stride
+            self.register_buffer(f"anchor_cells_s{i}", anchor_cell)
+            self.anchor_cells.append(anchor_cell)
 
             self.pred_layers.append(
                 nn.Sequential(
@@ -72,7 +71,6 @@ class YOLOv3Head(nn.Module):
                 )
             )
 
-        # Cache grid offsets for decoding, keyed by (scale_id, Sy, Sx, device, dtype)
         self._grid_cache: OrderedDict[
             Tuple[int, int, int, torch.device, torch.dtype],
             Tuple[torch.Tensor, torch.Tensor],
@@ -99,149 +97,3 @@ class YOLOv3Head(nn.Module):
             outputs.append(p)
 
         return outputs
-
-    def _get_grid(
-        self,
-        scale_id: int,
-        Sy: int,
-        Sx: int,
-        device: torch.device,
-        dtype: torch.dtype,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Get or create grid offsets for box decoding at given scale and resolution.
-
-        Args:
-            scale_id: Index of prediction scale.
-            Sy: Grid height.
-            Sx: Grid width.
-            device: Tensor device.
-            dtype: Tensor dtype.
-
-        Returns:
-            Tuple of grid_x and grid_y tensors shaped (1, Sy, Sx, 1).
-        """
-        key = (scale_id, Sy, Sx, device, dtype)
-        if key not in self._grid_cache:
-            yv, xv = torch.meshgrid(
-                torch.arange(Sy, device=device, dtype=dtype),
-                torch.arange(Sx, device=device, dtype=dtype),
-                indexing="ij",
-            )
-            grid_y = yv.unsqueeze(0).unsqueeze(-1)  # (1, Sy, Sx, 1)
-            grid_x = xv.unsqueeze(0).unsqueeze(-1)  # (1, Sy, Sx, 1)
-            self._grid_cache[key] = (grid_x, grid_y)
-        return self._grid_cache[key]
-
-    @torch.no_grad()
-    def decode(
-        self,
-        preds: List[torch.Tensor],
-        img_size: Tuple[int, int],
-        conf_thres: float = 0.25,
-        iou_thres: float = 0.45,
-        max_det: int = 300,
-    ) -> List[Dict[str, torch.Tensor]]:
-        """Decode raw multi-scale predictions into final detections.
-
-        Args:
-            preds: List of raw prediction tensors per scale.
-            img_size: Original image size (height, width) in pixels.
-            conf_thres: Confidence threshold for filtering detections.
-            iou_thres: IoU threshold for non-maximum suppression.
-            max_det: Maximum detections to keep per image.
-
-        Returns:
-            List of dictionaries (one per batch item) with keys:
-                'boxes' (Tensor[N, 4]),
-                'scores' (Tensor[N]),
-                'labels' (Tensor[N]).
-        """
-        if len(preds) != self.n_scales:
-            raise ValueError("Mismatch in number of prediction scales")
-
-        B, *_ = preds[0].shape
-        H, W = img_size
-        device, dtype = preds[0].device, preds[0].dtype
-        C = self.num_classes
-
-        all_boxes, all_scores, all_labels = [], [], []
-        for s, (pred, stride) in enumerate(zip(preds, self.strides)):
-            B_s, Sy, Sx, _ = pred.shape
-            a_i = pred.shape[-1] // (5 + C)
-
-            pred = pred.view(B_s, Sy, Sx, a_i, 5 + C)
-            tx, ty, tw, th, to = (
-                pred[..., 0],
-                pred[..., 1],
-                pred[..., 2],
-                pred[..., 3],
-                pred[..., 4],
-            )
-            cls_logits = pred[..., 5:]
-
-            cx = torch.sigmoid(tx)
-            cy = torch.sigmoid(ty)
-            bw = torch.exp(tw.clamp(max=8.0))
-            bh = torch.exp(th.clamp(max=8.0))
-            obj = torch.sigmoid(to)
-            cls_prob = torch.softmax(cls_logits, dim=-1)
-
-            grid_x, grid_y = self._get_grid(s, Sy, Sx, device, dtype)
-            anc_cell = getattr(self, f"anchor_cells_s{s}")
-            anc_w = anc_cell[:, 0].view(1, 1, 1, a_i)
-            anc_h = anc_cell[:, 1].view(1, 1, 1, a_i)
-
-            cx = (cx + grid_x) * stride
-            cy = (cy + grid_y) * stride
-            pw = anc_w * bw * stride
-            ph = anc_h * bh * stride
-
-            x1 = (cx - pw * 0.5).clamp(0, W - 1)
-            y1 = (cy - ph * 0.5).clamp(0, H - 1)
-            x2 = (cx + pw * 0.5).clamp(0, W - 1)
-            y2 = (cy + ph * 0.5).clamp(0, H - 1)
-            boxes = torch.stack((x1, y1, x2, y2), dim=-1)
-
-            boxes = boxes.view(B, -1, 4)
-            cls_prob = cls_prob.view(B, -1, C)
-            obj = obj.view(B, -1, 1)
-            scores = obj * cls_prob
-            scores_max, labels = scores.max(dim=-1)
-
-            all_boxes.append(boxes)
-            all_scores.append(scores_max)
-            all_labels.append(labels)
-
-        boxes_cat = torch.cat(all_boxes, dim=1)
-        scores_cat = torch.cat(all_scores, dim=1)
-        labels_cat = torch.cat(all_labels, dim=1)
-
-        results = []
-        for b in range(B):
-            mask = scores_cat[b] > conf_thres
-            if not mask.any():
-                results.append(
-                    {
-                        "boxes": torch.empty((0, 4), device=device),
-                        "scores": torch.empty(0, device=device),
-                        "labels": torch.empty(0, dtype=torch.long, device=device),
-                    }
-                )
-                continue
-
-            boxes_b = boxes_cat[b][mask]
-            scores_b = scores_cat[b][mask]
-            labels_b = labels_cat[b][mask]
-
-            keep = tv_ops.batched_nms(boxes_b, scores_b, labels_b, iou_thres)
-            keep = keep[:max_det]
-
-            results.append(
-                {
-                    "boxes": boxes_b[keep],
-                    "scores": scores_b[keep],
-                    "labels": labels_b[keep],
-                }
-            )
-
-        return results

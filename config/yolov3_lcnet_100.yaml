@@ -21,9 +21,9 @@ trainer:
 model:
   name: ObjectDetectionModel
   backbone:
-    name: Backbone
+    name: TimmBackbone
     options:
-      name: timm_lcnet_100
+      name: lcnet_100
       pretrained: True
       features_only: True
   neck:
@@ -52,6 +52,27 @@ model:
         - [3, 4, 5]
         - [6, 7, 8]
       strides: &coco_strides [8, 16, 32]
+  postprocessor:
+    eval:
+      name: YOLOv3Postprocessor
+      options:
+        anchors: *coco_anchors
+        anchor_masks: *coco_anchor_masks
+        strides: *coco_strides
+        num_classes: 80
+        conf_thres: 0.001
+        iou_thres: 0.65
+        max_det: 300
+    vis:
+      name: YOLOv3Postprocessor
+      options:
+        anchors: *coco_anchors
+        anchor_masks: *coco_anchor_masks
+        strides: *coco_strides
+        num_classes: 80
+        conf_thres: 0.25
+        iou_thres: 0.45
+        max_det: 300
   loss:
     name: YOLOv3Loss
     options:
@@ -68,7 +89,7 @@ model:
 
 dataset:
   train_options:
-    name: CoCoDataset
+    name: CentralDataset
     options:
       mode: train
       image_size: -1
@@ -76,7 +97,7 @@ dataset:
       return_tensor: True
       length_of_dataset: -1
   valid_options:
-    name: CoCoDataset
+    name: CentralDataset
     options:
       mode: val
       image_size: -1
