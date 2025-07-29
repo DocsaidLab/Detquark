@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 
 from ..layers import ConvBNActivation, PositionSensitiveAttention
-from ..utils import _clone_act
+from ..utils import clone_act
 from .bottleneck import BottleneckBlock
 
 __all__ = [
@@ -129,7 +129,7 @@ class CSPDualConvBottleneckBlock(nn.Module):
         hidden_channels = int(out_channels * expansion)
 
         # First 1 x 1 projection producing 2·hidden_channels, then split
-        act1 = _clone_act(self.default_act, activation)
+        act1 = clone_act(self.default_act, activation)
         self.conv1 = ConvBNActivation(
             in_channels,
             2 * hidden_channels,
@@ -154,7 +154,7 @@ class CSPDualConvBottleneckBlock(nn.Module):
         )
 
         # Final 1 x 1 to fuse concatenation
-        act2 = _clone_act(self.default_act, activation)
+        act2 = clone_act(self.default_act, activation)
         self.conv2 = ConvBNActivation(
             2 * hidden_channels,
             out_channels,
@@ -218,7 +218,7 @@ class CSPDualConvFastBottleneckBlock(nn.Module):
 
         hidden_channels = int(out_channels * expansion)
 
-        act1 = _clone_act(self.default_act, activation)
+        act1 = clone_act(self.default_act, activation)
         self.conv1 = ConvBNActivation(
             in_channels,
             2 * hidden_channels,
@@ -228,7 +228,7 @@ class CSPDualConvFastBottleneckBlock(nn.Module):
         )
 
         # Dynamically sized output channels: 2 + num_blocks splits
-        act2 = _clone_act(self.default_act, activation)
+        act2 = clone_act(self.default_act, activation)
         self.conv2 = ConvBNActivation(
             (2 + num_blocks) * hidden_channels,
             out_channels,
@@ -316,21 +316,21 @@ class CSPTripleConvBottleneckBlock(nn.Module):
             hidden_channels,
             kernel_size=1,
             stride=1,
-            activation=_clone_act(self.default_act, activation),
+            activation=clone_act(self.default_act, activation),
         )
         self.conv_skip = ConvBNActivation(
             in_channels,
             hidden_channels,
             kernel_size=1,
             stride=1,
-            activation=_clone_act(self.default_act, activation),
+            activation=clone_act(self.default_act, activation),
         )
         self.conv_fuse = ConvBNActivation(
             2 * hidden_channels,
             out_channels,
             kernel_size=1,
             stride=1,
-            activation=_clone_act(self.default_act, activation),
+            activation=clone_act(self.default_act, activation),
         )
 
         # Sequential Bottleneck stack operating on *hidden_channels*.
@@ -547,7 +547,7 @@ class CSPDualPSAStackBlock(nn.Module):
             2 * hidden,
             kernel_size=1,
             stride=1,
-            activation=_clone_act(self.default_act, activation),
+            activation=clone_act(self.default_act, activation),
         )
 
         # --- PSA stack on the second split ------------------------------ #
@@ -568,7 +568,7 @@ class CSPDualPSAStackBlock(nn.Module):
             in_channels,
             kernel_size=1,
             stride=1,
-            activation=_clone_act(self.default_act, activation),
+            activation=clone_act(self.default_act, activation),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

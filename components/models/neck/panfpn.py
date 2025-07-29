@@ -5,8 +5,13 @@ from typing import List, Sequence
 import torch
 import torch.nn as nn
 
-from .blocks import CSPKernelMixFastBottleneckBlock  # = C3k2
-from .layers import ConvBNActivation
+from ...blocks import CSPKernelMixFastBottleneckBlock
+from ...layers import ConvBNActivation
+
+__all__ = [
+    "PANFPNBlock",
+    "PANFPN",
+]
 
 
 # --------------------------------------------------------------------------- #

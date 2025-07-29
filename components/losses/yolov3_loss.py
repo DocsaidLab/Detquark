@@ -3,7 +3,7 @@ from typing import Dict, List, Literal, Tuple
 import torch
 import torch.nn as nn
 
-from .utils import build_targets
+from ..utils import build_targets
 
 
 class YOLOv3Loss(nn.Module):

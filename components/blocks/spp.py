@@ -4,9 +4,11 @@ import torch
 import torch.nn as nn
 
 from ..layers import ConvBNActivation
-from ..utils import _clone_act
+from ..utils import clone_act
 
-__all__ = ["SpatialPyramidPoolingFastBlock"]
+__all__ = [
+    "SpatialPyramidPoolingFastBlock",
+]
 
 
 class SpatialPyramidPoolingFastBlock(nn.Module):
@@ -56,7 +58,7 @@ class SpatialPyramidPoolingFastBlock(nn.Module):
 
         hidden = in_channels // 2
 
-        act1 = _clone_act(self.default_act, activation)
+        act1 = clone_act(self.default_act, activation)
         self.conv_proj = ConvBNActivation(
             in_channels,
             hidden,
@@ -65,7 +67,7 @@ class SpatialPyramidPoolingFastBlock(nn.Module):
             activation=act1,
         )
 
-        act2 = _clone_act(self.default_act, activation)
+        act2 = clone_act(self.default_act, activation)
         self.conv_fuse = ConvBNActivation(
             hidden * 4,
             out_channels,

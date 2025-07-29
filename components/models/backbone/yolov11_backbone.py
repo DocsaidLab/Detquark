@@ -5,9 +5,9 @@ from typing import List, Tuple
 import torch
 import torch.nn as nn
 
-from .blocks import (CSPDualPSAStackBlock, CSPKernelMixFastBottleneckBlock,
-                     SpatialPyramidPoolingFastBlock)
-from .layers import ConvBNActivation, make_divisible
+from ...blocks import (CSPDualPSAStackBlock, CSPKernelMixFastBottleneckBlock,
+                       SpatialPyramidPoolingFastBlock)
+from ...layers import ConvBNActivation, make_divisible
 
 try:
     from timm.models.registry import register_model
@@ -17,7 +17,7 @@ except ModuleNotFoundError:
         return fn
 
 
-__all__: List[str] = [
+__all__ = [
     "YoloV11Backbone",
     "yolov11_backbone_n",
     "yolov11_backbone_s",

@@ -3,7 +3,7 @@ from typing import Dict, List, Tuple
 import torch
 import torch.nn as nn
 
-from .utils import bbox_iou
+from ..utils import bbox_iou
 
 
 class YOLOv1Loss(nn.Module):
