@@ -21,9 +21,9 @@ trainer:
 model:
   name: ObjectDetectionModel
   backbone:
-    name: Backbone
+    name: TimmBackbone
     options:
-      name: timm_lcnet_100
+      name: lcnet_100
       pretrained: True
       features_only: True
   head:

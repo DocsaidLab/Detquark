@@ -194,11 +194,13 @@ cython_debug/
 .cursorindexingignore
 
 
-
 data/coco
+
 tmp*
 yolov1/
 yolov2/
 yolov3/
 yolov2_lcnet_100/
 yolov3_lcnet_100/
+
+yolov11/

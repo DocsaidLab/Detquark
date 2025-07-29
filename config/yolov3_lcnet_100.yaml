@@ -89,7 +89,7 @@ model:
 
 dataset:
   train_options:
-    name: CentralDataset
+    name: CoCoDataset
     options:
       mode: train
       image_size: -1
@@ -97,7 +97,7 @@ dataset:
       return_tensor: True
       length_of_dataset: -1
   valid_options:
-    name: CentralDataset
+    name: CoCoDataset
     options:
       mode: val
       image_size: -1

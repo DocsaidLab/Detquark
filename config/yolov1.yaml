@@ -21,9 +21,9 @@ trainer:
 model:
   name: ObjectDetectionModel
   backbone:
-    name: Backbone
+    name: TimmBackbone
     options:
-      name: timm_darknet53
+      name: darknet53
       pretrained: True
       features_only: True
   head:
