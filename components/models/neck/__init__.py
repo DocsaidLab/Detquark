@@ -1,3 +1,3 @@
-from .chameleon_neck import ChameleonNeck
-from .panfpn import PANFPN, PANFPNBlock
+from .bifpns import BiFPNs
 from .yolov3_neck import YOLOv3Neck
+from .yolov11_neck import PANFPNBlock, YOLOv11Neck

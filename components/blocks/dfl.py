@@ -15,49 +15,57 @@ __all__ = [
 class DFLIntegral(nn.Module):
     """Integral operator for Distribution-Focal Loss (DFL).
 
-    Converts discrete per-side logits into continuous distances via the
-    expectation ∑ p x bin_idx, where *bin_idx* ∈ {0,‥, R-1}.
+    This module computes the integral of a discrete probability distribution
+    over a range of regression bins using a fixed convolutional kernel.
 
-    Typical workflow
-    ----------------
-    >>> logits = torch.randn(B, 4 * 16, A)         # model output
-    >>> dist    = DFLIntegral(16)(logits)          # (B, 4, A) continuous
-    >>> boxes   = dist2bbox(dist, anchors)         # decode to boxes
+    Attributes:
+        reg_max (int): Number of discrete bins in the distribution.
+        conv (nn.Conv2d): Fixed 1x1 convolution layer implementing the integral
+            operator weights.
     """
 
     def __init__(self, reg_max: int = 16) -> None:
-        """
+        """Initializes the DFLIntegral operator.
+
         Args:
-            reg_max: Number of discrete bins *R* for each side
-                     (same value used during training loss computation).
+            reg_max (int): Number of discrete bins in the distribution.
+                Defaults to 16.
         """
         super().__init__()
         self.reg_max: int = reg_max
+        # Fixed 1x1 convolution with weights equal to [0, 1, ..., reg_max-1]
+        self.conv = nn.Conv2d(reg_max, 1, kernel_size=1, bias=False)
+        self.conv.requires_grad_(False)
 
-        # Register a non-trainable buffer [0, 1, ..., R-1] for dot-product.
-        proj = torch.linspace(0, reg_max - 1, reg_max).view(1, 1, reg_max, 1)
-        self.register_buffer("project", proj, persistent=False)
+        # Initialize convolution weights to [0,1,...,reg_max-1] shape (1, reg_max, 1, 1)
+        weight = \
+            torch.arange(reg_max, dtype=torch.float).view(1, reg_max, 1, 1)
+        self.conv.weight.data.copy_(weight)
 
     def forward(self, logits: torch.Tensor) -> torch.Tensor:
-        """
+        """Computes the integral of the probability distribution.
+
         Args:
-            logits: Tensor of shape ``(B, 4 x R, A)``, where *R = reg_max*.
+            logits (torch.Tensor):
+                Input tensor of shape (batch_size, 4 * reg_max, num_anchors)
+                representing raw distribution logits.
 
         Returns:
-            Tensor of shape ``(B, 4, A)`` — expected distances per side.
+            torch.Tensor:
+                Tensor of shape (batch_size, 4, num_anchors) containing
+                the predicted continuous regression values.
         """
-        b, _, a = logits.shape
-        if logits.shape[1] % self.reg_max != 0:
-            raise ValueError(
-                f"Channel dimension ({logits.shape[1]}) must be divisible by "
-                f"reg_max ({self.reg_max})."
-            )
-
-        # Reshape → (B, 4, R, A) then softmax over R
-        prob = logits.view(b, 4, self.reg_max, a).softmax(dim=2)
-
-        # Expectation: ∑ p_k · k  (broadcast dot product with self.project)
-        return (prob * self.project).sum(dim=2)  # (B, 4, A)
+        batch_size, _, num_anchors = logits.shape
+        # Reshape to (batch_size, 4, reg_max, num_anchors) then softmax over bins
+        prob = (
+            logits
+            .view(batch_size, 4, self.reg_max, num_anchors)
+            .transpose(1, 2)
+            .softmax(dim=1)
+        )
+        # Apply fixed convolution to compute expectation over bins
+        integral = self.conv(prob).view(batch_size, 4, num_anchors)
+        return integral
 
 
 class DistributionFocalLoss(nn.Module):
@@ -120,27 +128,25 @@ class DistributionFocalLoss(nn.Module):
             )
 
         # Clamp target to valid range [0, R- 1).
-        target = target.clamp_(0.0, self.reg_max - 1 - 1e-3)
+        target = target.clamp_(0.0, self.reg_max - 1 - 0.01)
 
         # Left / right integer bins and linear weights.
-        tl = target.floor().long()          # target left bin
-        tr = (tl + 1).clamp(max=self.reg_max - 1)  # target right bin
-        wl = (tr.float() - target)          # weight for left bin
-        wr = 1.0 - wl                       # weight for right bin
+        tl = target.long()            # target left bin
+        tr = (tl + 1)                 # target right bin
+        wl = tr - target              # weight for left bin
+        wr = 1 - wl                   # weight for right bin
 
         # Flatten everything except logits dimension for CE.
         ce_left = F.cross_entropy(
-            pred.view(-1, self.reg_max), tl.view(-1), reduction="none"
-        ).view_as(tl)
+            pred, tl.view(-1), reduction="none").view_as(tl)
         ce_right = F.cross_entropy(
-            pred.view(-1, self.reg_max), tr.view(-1), reduction="none"
-        ).view_as(tl)
+            pred, tr.view(-1), reduction="none").view_as(tl)
 
-        loss = ce_left * wl + ce_right * wr  # (...,)
+        loss = ce_left * wl + ce_right * wr
 
         if reduction == "sum":
             return loss.sum()
         if reduction == "mean":
             return loss.mean()
 
-        return loss  # reduction == "none"
+        return loss

@@ -5,7 +5,7 @@ from typing import List, Tuple
 import torch
 import torch.nn as nn
 
-from ...blocks import (CSPDualPSAStackBlock, CSPKernelMixFastBottleneckBlock,
+from ...blocks import (CSPKernelMixFastBottleneckBlock,
                        SpatialPyramidPoolingFastBlock)
 from ...layers import ConvBNActivation, make_divisible
 
@@ -64,9 +64,14 @@ class YoloV11Backbone(nn.Module):
 
         depth_mul, width_mul, c_max = self._variant_cfg[variant]
 
+        self.depth_mul = depth_mul
+        self.width_mul = width_mul
+        self.max_channels = c_max
+        self.variant = variant
+
         def c(base: int) -> int:
             """Compute channel count: width multiplier then divisible by 8."""
-            return make_divisible(min(int(base * width_mul), c_max), 8)
+            return make_divisible(min(base, c_max) * width_mul, 8)
 
         def depth(reps: int) -> int:
             """Compute block repeat count: at least 1."""
@@ -77,9 +82,8 @@ class YoloV11Backbone(nn.Module):
 
         # Compute repeats for different stages
         rep_small = depth(2)   # for stage2 and part of stage5
-        rep_mid = depth(2)   # for stage3
+        rep_mid = depth(2)     # for stage3
         rep_large = depth(2)   # for stage4
-        rep_psa = depth(2)   # for PSA stack in stage5
 
         # ---------- build network layers ----------
         # P1: stem convolution, downsample by 2
@@ -90,7 +94,7 @@ class YoloV11Backbone(nn.Module):
         self.stage2 = CSPKernelMixFastBottleneckBlock(
             c2, c3,
             num_blocks=rep_small,
-            use_c3k=False,
+            use_c3k=True if variant in "mlx" else False,  # n variant uses C3k
             expansion=0.25,
         )
 
@@ -99,7 +103,7 @@ class YoloV11Backbone(nn.Module):
         self.stage3 = CSPKernelMixFastBottleneckBlock(
             c3, c4,
             num_blocks=rep_mid,
-            use_c3k=False,
+            use_c3k=True if variant in "mlx" else False,  # n variant uses C3k
             expansion=0.25,
         )
 
@@ -121,16 +125,15 @@ class YoloV11Backbone(nn.Module):
                 use_c3k=True,
                 expansion=0.5,
             ),
-            SpatialPyramidPoolingFastBlock(c5, c5, kernel_size=5),
-            CSPDualPSAStackBlock(c5, num_blocks=rep_psa),
+            SpatialPyramidPoolingFastBlock(c5, c5, kernel_size=5)
         )
 
         # Metadata for timm compatibility
         self.out_indices = out_indices
         self.feature_info = [
             {"num_chs": c1, "reduction": 2,  "module": "stem",   "stage": 1},
-            {"num_chs": c3, "reduction": 4,  "module": "stage2", "stage": 2},
-            {"num_chs": c4, "reduction": 8,  "module": "stage3", "stage": 3},
+            {"num_chs": c2, "reduction": 4,  "module": "stage2", "stage": 2},
+            {"num_chs": c3, "reduction": 8,  "module": "stage3", "stage": 3},
             {"num_chs": c4, "reduction": 16, "module": "stage4", "stage": 4},
             {"num_chs": c5, "reduction": 32, "module": "stage5", "stage": 5},
         ]
@@ -146,12 +149,13 @@ class YoloV11Backbone(nn.Module):
         Returns:
             List[torch.Tensor]: Selected feature maps as per `out_indices`.
         """
-        p1 = self.stem(x)                      # /2
-        p2 = self.stage2(self.down2(p1))       # /4
-        p3 = self.stage3(self.down3(p2))       # /8
-        p4 = self.stage4(self.down4(p3))       # /16
-        p5 = self.stage5(self.down5(p4))       # /32
+        p1 = self.stem(x)
+        p2 = self.down2(p1)
+        p3 = self.down3(self.stage2(p2))
+        p4 = self.down4(self.stage3(p3))
+        p5 = self.stage5(self.down5(self.stage4(p4)))
         feats = (p1, p2, p3, p4, p5)
+
         return [feats[i] for i in self.out_indices]
 
     def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
@@ -159,24 +163,49 @@ class YoloV11Backbone(nn.Module):
         return self.forward_features(x)
 
     def _init_weights(self) -> None:
-        """Initialize convolution and batchnorm weights."""
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
+        """Initialize weights using best practices for SiLU-based convolutional neural networks.
+
+        - Conv2d (point-wise):
+            Kaiming normal initialization with fan_out mode and SiLU-equivalent gain.
+        - Conv2d (depth-wise):
+            Kaiming normal initialization with fan_in mode.
+        - BatchNorm layers:
+            weight (gamma) set to 1, bias (beta) set to 0, running_mean zeroed, and running_var set to 1.
+        - Linear layers:
+            truncated normal initialization with std=0.02.
+        - Other modules: PyTorch default initialization.
+        """
+        for module in self.modules():
+            if isinstance(module, nn.Conv2d):
+                # Determine if this is a depth-wise convolution
+                is_depthwise = (
+                    module.groups == module.in_channels == module.out_channels
+                )
                 nn.init.kaiming_normal_(
-                    m.weight, mode="fan_out", nonlinearity="relu")
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-            elif isinstance(m, (nn.BatchNorm2d, nn.SyncBatchNorm)):
-                nn.init.ones_(m.weight)
-                nn.init.zeros_(m.bias)
+                    module.weight,
+                    mode="fan_in" if is_depthwise else "fan_out",
+                    nonlinearity="linear",
+                )
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
 
-    def get_classifier(self):
-        """Stub for timm classifier accessor."""
-        return None
+            elif isinstance(module, (nn.BatchNorm2d, nn.SyncBatchNorm)):
+                # Initialize BatchNorm: gamma=1, beta=0, reset running stats
+                nn.init.ones_(module.weight)
+                nn.init.zeros_(module.bias)
+                module.running_mean.zero_()
+                module.running_var.fill_(1.0)
 
-    def reset_classifier(self, num_classes: int = 0, global_pool: str | None = None) -> None:
-        """Stub for timm classifier reset."""
-        pass
+            elif isinstance(module, nn.Linear):
+                # Initialize Linear layers with truncated normal distribution
+                nn.init.trunc_normal_(module.weight, std=0.02)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+
+            elif isinstance(module, nn.LayerNorm):
+                # Initialize LayerNorm layers: gamma=1, beta=0
+                nn.init.ones_(module.weight)
+                nn.init.zeros_(module.bias)
 
 
 def _create_backbone(variant: str, pretrained: bool = False, **kwargs) -> YoloV11Backbone:

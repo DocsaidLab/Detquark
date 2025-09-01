@@ -8,12 +8,12 @@ from ..utils import clone_act
 from .bottleneck import BottleneckBlock
 
 __all__ = [
-    'CSPPointwiseResidualBlock',
-    'CSPDualConvBottleneckBlock',
-    'CSPDualConvFastBottleneckBlock',
-    'CSPTripleConvBottleneckBlock',
-    'CSPTripleConvKernelBlock',
-    'CSPKernelMixFastBottleneckBlock',
+    'CSPPointwiseResidualBlock',        # Same as C1
+    'CSPDualConvBottleneckBlock',       # Same as C2
+    'CSPDualConvFastBottleneckBlock',   # Same as C2f
+    'CSPTripleConvBottleneckBlock',     # Same as C3
+    'CSPTripleConvKernelBlock',         # Same as C3k
+    'CSPKernelMixFastBottleneckBlock',  # Same as C3k2
     'CSPDualPSAStackBlock',
 ]
 
@@ -74,25 +74,25 @@ class CSPDualConvBottleneckBlock(nn.Module):
 
     Block diagram::
 
-        ┌───────────────┐
-        │     x         │
-        └───────────────┘
-               │
-        ┌──────▼───── Conv1x1 (2·h) ───────┐
-        │                                  │
-      Split                             Split
-        │                                  │
-   ┌────▼────┐                       ┌─────▼────┐
-   │   y1    │                       │    y2    │
-   └─────────┘                       └──────────┘
-        │                                   │
-   Bottleneck x n                           │
-        │                                   │
-        └───────► Concat(y1, y2) ◄──────────┘
-                      │
-                 Conv1x1 (out)
-                      │
-                    out
+                    ┌───────────────┐
+                    │     x         │
+                    └───────────────┘
+                            │
+            ┌──────-───── Conv1x1 (2·h) ───────┐
+            │                                  │
+            Split                              Split
+            │                                  │
+        ┌────▼────┐                       ┌─────▼────┐
+        │   y1    │                       │    y2    │
+        └─────────┘                       └──────────┘
+            │                                   │
+        Bottleneck x n                          │
+            │                                   │
+            └───────► Concat(y1, y2) ◄──────────┘
+                            │
+                        Conv1x1 (out)
+                            │
+                            out
 
     Args:
         in_channels (int):   Number of input feature channels.
@@ -138,6 +138,16 @@ class CSPDualConvBottleneckBlock(nn.Module):
             activation=act1,
         )
 
+        # Final 1 x 1 to fuse concatenation
+        act2 = clone_act(self.default_act, activation)
+        self.conv2 = ConvBNActivation(
+            2 * hidden_channels,
+            out_channels,
+            kernel_size=1,
+            stride=1,
+            activation=act2,
+        )
+
         # Bottleneck stack operates on the first half (hidden_channels)
         self.bottlenecks = nn.Sequential(
             *(
@@ -151,16 +161,6 @@ class CSPDualConvBottleneckBlock(nn.Module):
                 )
                 for _ in range(num_blocks)
             )
-        )
-
-        # Final 1 x 1 to fuse concatenation
-        act2 = clone_act(self.default_act, activation)
-        self.conv2 = ConvBNActivation(
-            2 * hidden_channels,
-            out_channels,
-            kernel_size=1,
-            stride=1,
-            activation=act2,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -177,9 +177,9 @@ class CSPDualConvFastBottleneckBlock(nn.Module):
     but re-implemented with Google-style, ONNX-friendly code:
 
     1. **Projection** - 1 x 1 conv producing *2·h* channels
-       ``y0, y1 = split(conv1x1(x))``
+        ``y0, y1 = split(conv1x1(x))``
     2. **Stack** - repeatedly apply *n* Bottleneck blocks to *y1*,
-       appending each output to the list.
+        appending each output to the list.
     3. **Fusion** - concatenate all tensors and fuse with a final 1 x 1 conv.
 
     Args:
@@ -216,12 +216,12 @@ class CSPDualConvFastBottleneckBlock(nn.Module):
     ) -> None:
         super().__init__()
 
-        hidden_channels = int(out_channels * expansion)
+        self.hidden_channels = int(out_channels * expansion)
 
         act1 = clone_act(self.default_act, activation)
         self.conv1 = ConvBNActivation(
             in_channels,
-            2 * hidden_channels,
+            2 * self.hidden_channels,
             kernel_size=1,
             stride=1,
             activation=act1,
@@ -230,7 +230,7 @@ class CSPDualConvFastBottleneckBlock(nn.Module):
         # Dynamically sized output channels: 2 + num_blocks splits
         act2 = clone_act(self.default_act, activation)
         self.conv2 = ConvBNActivation(
-            (2 + num_blocks) * hidden_channels,
+            (2 + num_blocks) * self.hidden_channels,
             out_channels,
             kernel_size=1,
             stride=1,
@@ -240,8 +240,8 @@ class CSPDualConvFastBottleneckBlock(nn.Module):
         # Inner Bottleneck stack (ModuleList for iterative access)
         self.blocks = nn.ModuleList(
             BottleneckBlock(
-                hidden_channels,
-                hidden_channels,
+                self.hidden_channels,
+                self.hidden_channels,
                 shortcut=shortcut,
                 groups=groups,
                 kernel_sizes=((3, 3), (3, 3)),
@@ -341,7 +341,7 @@ class CSPTripleConvBottleneckBlock(nn.Module):
                     hidden_channels,
                     shortcut=shortcut,
                     groups=groups,
-                    kernel_sizes=((3, 3), (3, 3)),
+                    kernel_sizes=((1, 1), (3, 3)),
                     expansion=1.0,
                 )
                 for _ in range(num_blocks)
@@ -428,29 +428,24 @@ class CSPTripleConvKernelBlock(CSPTripleConvBottleneckBlock):
 
 
 class CSPKernelMixFastBottleneckBlock(CSPDualConvFastBottleneckBlock):
-    """Fast CSP bottleneck (*C3k2*) with optional kernel-mix inner blocks.
-
-    This block inherits the projection/split/fusion logic from
-    :class:`CSPDualConvFastBottleneckBlock` (formerly *C2f*) and lets you pick
-    the inner stack implementation:
-
-    * **CSPTripleConvKernelBlock** (*C3k*) — when ``use_c3k`` is ``True``
-    * **BottleneckBlock**                  — otherwise
+    """CSP bottleneck with mixed kernel sizes in the inner stack.
+    This block extends the fast CSP design to support mixed kernel sizes
+    in the inner Bottleneck stack, allowing for more flexible feature extraction.
 
     Args:
         in_channels (int):   Input feature channels.
         out_channels (int):  Output feature channels.
-        num_blocks (int, optional): Number of inner blocks. Defaults ``1``.
-        use_c3k (bool, optional): Use *C3k* inner blocks if ``True``.
-            Defaults ``False``.
+        num_blocks (int, optional): Number of inner Bottleneck blocks.
+            Defaults to ``1``.
+        use_c3k (bool, optional): If ``True``, use :class:` CSPTripleConvKernelBlock`
+            instead of the standard Bottleneck. This allows for mixed kernel sizes
+            in the inner stack. Defaults to ``False``.
         expansion (float, optional): Hidden-channel expansion ratio.
-            Defaults ``0.5``.
-        groups (int, optional): Convolution groups for inner blocks.
-            Defaults ``1``.
-        shortcut (bool, optional): Enable shortcut inside each inner block.
-            Defaults ``True``.
+            Defaults to ``0.5``.
+        groups (int, optional): Convolution groups for Bottlenecks.
+            Defaults to ``1``.
+        shortcut (bool, optional): Enable shortcut in each Bottleneck.  Defaults to ``True``.
         activation (bool | nn.Module, optional): Activation selector.
-
             * ``True`` → fresh SiLU (default)
             * ``False`` → identity
             * ``nn.Module`` → user-supplied (deep-copied)
@@ -479,23 +474,21 @@ class CSPKernelMixFastBottleneckBlock(CSPDualConvFastBottleneckBlock):
             activation=activation,
         )
 
-        hidden_channels = int(out_channels * expansion)
-
         # Replace parent-defined inner stack with the desired block type.
         self.blocks = nn.ModuleList()
         for _ in range(num_blocks):
             if use_c3k:
                 block = CSPTripleConvKernelBlock(
-                    hidden_channels,
-                    hidden_channels,
+                    self.hidden_channels,
+                    self.hidden_channels,
                     num_blocks=2,
                     shortcut=shortcut,
                     groups=groups
                 )
             else:
                 block = BottleneckBlock(
-                    hidden_channels,
-                    hidden_channels,
+                    self.hidden_channels,
+                    self.hidden_channels,
                     shortcut=shortcut,
                     groups=groups
                 )
@@ -539,12 +532,21 @@ class CSPDualPSAStackBlock(nn.Module):
     ) -> None:
         super().__init__()
 
-        self.hidden = hidden = int(in_channels * expansion)
+        self.hidden = int(in_channels * expansion)
 
         # --- 1 x 1 projection & split ----------------------------------- #
         self.conv_proj = ConvBNActivation(
             in_channels,
-            2 * hidden,
+            2 * self.hidden,
+            kernel_size=1,
+            stride=1,
+            activation=clone_act(self.default_act, activation),
+        )
+
+        # --- 1 x 1 fusion ------------------------------------------------ #
+        self.conv_fuse = ConvBNActivation(
+            2 * self.hidden,
+            in_channels,
             kernel_size=1,
             stride=1,
             activation=clone_act(self.default_act, activation),
@@ -554,21 +556,12 @@ class CSPDualPSAStackBlock(nn.Module):
         self.psa_stack = nn.Sequential(
             *(
                 PositionSensitiveAttention(
-                    channels=hidden,
+                    channels=self.hidden,
                     attn_ratio=attn_ratio,
-                    num_heads=max(1, hidden // 64)
+                    num_heads=max(1, self.hidden // 64)
                 )
                 for _ in range(num_blocks)
             )
-        )
-
-        # --- 1 x 1 fusion ------------------------------------------------ #
-        self.conv_fuse = ConvBNActivation(
-            2 * hidden,
-            in_channels,
-            kernel_size=1,
-            stride=1,
-            activation=clone_act(self.default_act, activation),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

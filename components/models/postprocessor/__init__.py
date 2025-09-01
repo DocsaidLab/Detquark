@@ -1,1 +1,1 @@
-from .yolov3_postprocessor import YOLOv3Postprocessor
+from .yolov11_postprocessor import YOLOv11Postprocessor

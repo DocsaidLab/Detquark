@@ -5,18 +5,15 @@ from typing import List, Sequence
 import torch
 import torch.nn as nn
 
-from ...blocks import CSPKernelMixFastBottleneckBlock
+from ...blocks import CSPDualPSAStackBlock, CSPKernelMixFastBottleneckBlock
 from ...layers import ConvBNActivation
 
 __all__ = [
     "PANFPNBlock",
-    "PANFPN",
+    "YOLOv11Neck",
 ]
 
 
-# --------------------------------------------------------------------------- #
-# PANFPNBlock                                                                 #
-# --------------------------------------------------------------------------- #
 class PANFPNBlock(nn.Module):
     """Single-stage PAN-FPN fusion block.
 
@@ -38,7 +35,7 @@ class PANFPNBlock(nn.Module):
         self,
         in_channels_list: Sequence[int],
         repeat: int = 2,
-        enable_c3k_last: bool = True,
+        variant: str = "n",
     ) -> None:
         super().__init__()
 
@@ -63,7 +60,7 @@ class PANFPNBlock(nn.Module):
                     in_channels_list[hi] + in_channels_list[lo],
                     in_channels_list[lo],
                     num_blocks=repeat,
-                    use_c3k=False,  # Top-down blocks always disable use_c3k
+                    use_c3k=True if variant in "mlx" else False,
                 )
             )
 
@@ -85,9 +82,15 @@ class PANFPNBlock(nn.Module):
                     in_channels=in_channels_list[lo] + in_channels_list[hi],
                     out_channels=in_channels_list[hi],
                     num_blocks=repeat,
-                    use_c3k=enable_c3k_last and (hi == self.levels - 1),
+                    use_c3k=True if (hi == self.levels -
+                                     1) or variant in "mlx" else False,
                 )
             )
+
+        self.c2psa = CSPDualPSAStackBlock(
+            in_channels=in_channels_list[-1],
+            num_blocks=repeat,
+        )
 
     def forward(self, feats: List[torch.Tensor]) -> List[torch.Tensor]:
         """Perform one stage of bidirectional feature fusion.
@@ -110,9 +113,18 @@ class PANFPNBlock(nn.Module):
         for idx, td_block in enumerate(self.td_blocks):
             hi = self.levels - 1 - idx  # e.g., 2, 1, ...
             lo = hi - 1                 # e.g., 1, 0, ...
+
+            if hi == self.levels - 1:  # Last level (highest)
+                # Apply CSPDualPSAStackBlock
+                feats_highest = self.c2psa(feats[hi])
+
+            feats_h = feats_highest if hi == self.levels - 1 else feats[hi]
+            feats_l = feats[lo]
+
             fused = torch.cat(
-                [self.upsamples[hi - 1](feats[hi]), feats[lo]], dim=1
+                [self.upsamples[hi - 1](feats_h), feats_l], dim=1
             )
+
             feats[lo] = td_block(fused)
 
         # Bottom-up fusion: from lowest to highest level (P3 → Pn)
@@ -124,7 +136,7 @@ class PANFPNBlock(nn.Module):
         return feats
 
 
-class PANFPN(nn.Module):
+class YOLOv11Neck(nn.Module):
     """Stacked PAN-FPN neck with customizable input and output feature levels.
 
     Args:
@@ -146,8 +158,10 @@ class PANFPN(nn.Module):
         in_indices: List[int],
         n_blocks: int = 1,
         repeat: int = 2,
-        enable_c3k_last: bool = True,
+        depth_mul: float = 1.0,
         out_indices: List[int] | None = None,
+        variant: str = "n",
+        **kwargs: object,
     ) -> None:
         super().__init__()
 
@@ -165,12 +179,13 @@ class PANFPN(nn.Module):
             raise ValueError("`out_indices` exceeds range of `in_indices`.")
 
         # Create stacked PANFPNBlocks
+        scaled_repeat = max(1, round(repeat * depth_mul))
         self.blocks = nn.ModuleList(
             [
                 PANFPNBlock(
                     in_channels_list=self.sel_channels,
-                    repeat=repeat,
-                    enable_c3k_last=enable_c3k_last,
+                    repeat=scaled_repeat,
+                    variant=variant,
                 )
                 for _ in range(n_blocks)
             ]
